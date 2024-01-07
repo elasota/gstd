@@ -1,0 +1,8 @@
+[submodule "modules/zstdhl"]
+	path = modules/zstdhl
+	url = https://github.com/elasota/zstdhl.git
+	branch = main
+[submodule "modules/zstd"]
+	path = modules/zstd
+	url = https://github.com/facebook/zstd
+	branch = dev

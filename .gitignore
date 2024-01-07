@@ -1,0 +1,17 @@
+CMakeCache.txt
+CMakeFiles
+.vs
+*.vcxproj
+*.filters
+*.user
+*.sln
+*.cmake
+*.exe
+*.pdb
+*.lib
+*.recipe
+*.obj
+*.ilk
+*.tlog
+*.lastbuildstate
+*.log
