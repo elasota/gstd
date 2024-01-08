@@ -1,0 +1,5 @@
+This software is made available under a dual-licensing scheme.
+
+You may to use, modify, and redistribute it under either the MIT license,
+as described in the attached LICENSE_MIT.txt file, or the Apache License,
+Version 2.0, as described in the attached LICENSE_APACHE2.txt file.
