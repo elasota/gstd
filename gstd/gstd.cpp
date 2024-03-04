@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2023 Eric Lasota
+Copyright (c) 2024 Eric Lasota
 
 This software is available under the terms of the MIT license
 or the Apache License, Version 2.0.  For more information, see
@@ -324,8 +324,9 @@ void PrintUsageAndQuit()
 	fprintf(stderr, "    d - Decompresses input to output\n");
 	fprintf(stderr, "Options:\n");
 	fprintf(stderr, "    -pagesize <size> - Sets the size of a page (default is 65536 bytes)\n");
-	fprintf(stderr, "    -level <level> - Sets compression level (default is 9)\n");
-	fprintf(stderr, "    -t <threads> - Sets maximum thread count\n");
+	fprintf(stderr, "    -level <level>   - Sets compression level (default is 9)\n");
+	fprintf(stderr, "    -t <threads>     - Sets maximum thread count\n");
+	fprintf(stderr, "    -f <path>        - Sets path to output failed blocks to (for debugging)\n");
 
 	exit(-1);
 }
@@ -424,7 +425,7 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, const char *failBlockPath);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, size_t compressedSize, size_t uncompressedSize);
@@ -433,6 +434,7 @@ public:
 	size_t PageSize() const;
 	size_t GlobalSize() const;
 	unsigned int CompressionLevel() const;
+	const char* FailBlockPath() const;
 
 private:
 	std::mutex m_inFileMutex;
@@ -448,10 +450,11 @@ private:
 	size_t m_numPages;
 
 	unsigned int m_compressionLevel;
+	const char* m_failBlockPath;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel)
-	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize), m_compressionLevel(compressionLevel)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, const char* failBlockPath)
+	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize), m_compressionLevel(compressionLevel), m_failBlockPath(failBlockPath)
 {
 }
 
@@ -500,6 +503,11 @@ size_t CompressionGlobal::GlobalSize() const
 unsigned int CompressionGlobal::CompressionLevel() const
 {
 	return m_compressionLevel;
+}
+
+const char* CompressionGlobal::FailBlockPath() const
+{
+	return m_failBlockPath;
 }
 
 class CompressionTask : public ThreadedTaskBase
@@ -587,11 +595,6 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 {
 	m_workUnit = workUnit;
 
-	if (workUnit == 64)
-	{
-		int n = 0;
-	}
-
 	size_t currentPageSize = ComputeCurrentPageSize();
 
 	m_cglobal->ReadFromInput(m_inputData, workUnit * m_cglobal->PageSize(), currentPageSize);
@@ -612,23 +615,37 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 
 	if (transcodeResult != ZSTDHL_RESULT_OK)
 	{
-		fprintf(stderr, "Failed with result code %i in block %zu\n", static_cast<int>(transcodeResult), m_workUnit);
-		m_transcodedSize = 0;
+		const char* failBlockBase = m_cglobal->FailBlockPath();
 
-		char debugPath[1024];
-		sprintf_s(debugPath, "D:\\experiments\\fail_block_%zu.bin", m_workUnit);
-
-		if (FILE *debugFile = fopen(debugPath, "wb"))
+		if (failBlockBase[0] != 0)
 		{
-			fwrite(m_inputData, 1, currentPageSize, debugFile);
-			fclose(debugFile);
-		}
+			std::string pathBase(failBlockBase);
+			if (pathBase.back() != '/' && pathBase.back() != '\\')
+				pathBase.append("/");
 
-		sprintf_s(debugPath, "D:\\experiments\\fail_block_%zu.zstd", m_workUnit);
-		if (FILE *debugFile = fopen(debugPath, "wb"))
-		{
-			fwrite(m_compressedData, 1, m_compressedSize, debugFile);
-			fclose(debugFile);
+			fprintf(stderr, "Failed with result code %i in block %zu\n", static_cast<int>(transcodeResult), m_workUnit);
+			m_transcodedSize = 0;
+
+			char debugPath[128];
+			sprintf_s(debugPath, "fail_block_%zu.bin", m_workUnit);
+
+			std::string fullPath = pathBase + debugPath;
+
+			if (FILE* debugFile = fopen(fullPath.c_str(), "wb"))
+			{
+				fwrite(m_inputData, 1, currentPageSize, debugFile);
+				fclose(debugFile);
+			}
+
+			sprintf_s(debugPath, "fail_block_%zu.zstd", m_workUnit);
+
+			fullPath = pathBase + debugPath;
+
+			if (FILE* debugFile = fopen(fullPath.c_str(), "wb"))
+			{
+				fwrite(m_compressedData, 1, m_compressedSize, debugFile);
+				fclose(debugFile);
+			}
 		}
 	}
 }
@@ -712,6 +729,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	unsigned int numThreads = maxThreads;
 	unsigned int pageSize = 64 * 1024;
 	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
+	const char* failBlockPath = "";
 
 	for (int i = 0; i < optc; i++)
 	{
@@ -733,6 +751,17 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 				fprintf(stderr, "Invalid thread count for -t");
 				return -1;
 			}
+		}
+		else if (!strcmp(optName, "-f"))
+		{
+			i++;
+			if (i == optc)
+			{
+				fprintf(stderr, "Expected path for -f");
+				return -1;
+			}
+
+			failBlockPath = optv[i];
 		}
 		else if (!strcmp(optName, "-level"))
 		{
@@ -807,7 +836,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, failBlockPath);
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 
