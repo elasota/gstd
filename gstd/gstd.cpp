@@ -13,6 +13,8 @@ the included LICENSE.txt file.
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stddef.h>
 #include <thread>
 #include <mutex>
 #include <vector>
@@ -23,6 +25,7 @@ struct SerializedTaskGlobalState;
 struct SerializedTaskWorkerState;
 
 extern void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity);
+extern "C" uint32_t crc32(uint32_t crc, const void *buf, size_t len);
 
 class AutoResetEvent
 {
@@ -306,7 +309,7 @@ void SerializedTaskGlobalState::WaitForCompletion(size_t index)
 
 // SerializedTaskWorkerState
 SerializedTaskWorkerState::SerializedTaskWorkerState()
-	: m_terminated(false), m_globalState(nullptr), m_taskRunner(nullptr)
+	: m_terminated(false), m_globalState(nullptr), m_taskRunner(nullptr), m_started(false), m_workUnitIndex(0)
 {
 }
 
@@ -364,13 +367,17 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 		return -1;
 	}
 
+	int blockIndex = 0;
 	for (;;)
 	{
 		bytesRead = fread(sizeBytes, 1, 4, inF);
 
+		if (bytesRead == 0)
+			break;
+
 		if (bytesRead != 4)
 		{
-			fprintf(stderr, "Failed to read page size");
+			fprintf(stderr, "Failed to read block size");
 			return -1;
 		}
 
@@ -378,15 +385,17 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 
 		if (blockSize > pageSize || blockSize == 0)
 		{
-			fprintf(stderr, "Malformed page size");
+			fprintf(stderr, "Malformed block size");
 			return -1;
 		}
+
+		///
 
 		bytesRead = fread(sizeBytes, 1, 4, inF);
 
 		if (bytesRead != 4)
 		{
-			fprintf(stderr, "Failed to read page size");
+			fprintf(stderr, "Failed to read uncompressed size");
 			return -1;
 		}
 
@@ -398,13 +407,35 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 			return -1;
 		}
 
+		///
+
+		bytesRead = fread(sizeBytes, 1, 4, inF);
+
+		if (bytesRead != 4)
+		{
+			fprintf(stderr, "Failed to read CRC");
+			return -1;
+		}
+
+		uint32_t expectedCRC  = sizeBytes[0] | (static_cast<uint32_t>(sizeBytes[1]) << 8) | (static_cast<uint32_t>(sizeBytes[2]) << 16) | (static_cast<uint32_t>(sizeBytes[3]) << 24);
+
 		std::vector<uint8_t> compressedPage;
 		compressedPage.resize(blockSize);
 
 		bytesRead = fread(&compressedPage[0], 1, blockSize, inF);
 
+		uint32_t actualCRC = 0;
 		if (bytesRead == pageSize)
+		{
 			fwrite(&compressedPage[0], 1, bytesRead, outF);
+
+			uint32_t actualCRC = crc32(0, &compressedPage[0], uncompressedSize);
+			if (actualCRC != expectedCRC)
+			{
+				fprintf(stderr, "Error in block %i: Expected CRC %x but CRC was %x", blockIndex, expectedCRC, actualCRC);
+				return -1;
+			}
+		}
 		else
 		{
 			std::vector<uint8_t> decompressedPage;
@@ -412,8 +443,17 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 
 			DecompressGstdCPU32(&compressedPage[0], blockSize, &decompressedPage[0], uncompressedSize);
 
+			uint32_t actualCRC = crc32(0, &decompressedPage[0], uncompressedSize);
+			if (actualCRC != expectedCRC)
+			{
+				fprintf(stderr, "Error in block %i: Expected CRC %x but CRC was %x", blockIndex, expectedCRC, actualCRC);
+				return -1;
+			}
+
 			fwrite(&decompressedPage[0], 1, uncompressedSize, outF);
 		}
+
+		blockIndex++;
 	}
 
 	fclose(inF);
@@ -428,7 +468,7 @@ public:
 	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, const char *failBlockPath);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
-	void WriteToOutput(const void *src, size_t compressedSize, size_t uncompressedSize);
+	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
 
 	size_t NumPages() const;
 	size_t PageSize() const;
@@ -466,11 +506,11 @@ void CompressionGlobal::ReadFromInput(void *dest, size_t offset, size_t size)
 	fread(dest, 1, size, m_inF);
 }
 
-void CompressionGlobal::WriteToOutput(const void *src, size_t compressedSize, size_t uncompressedSize)
+void CompressionGlobal::WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize)
 {
 	std::lock_guard<std::mutex> lock(m_outFileMutex);
 
-	uint8_t chunkSizeBytes[8];
+	uint8_t chunkSizeBytes[12];
 	chunkSizeBytes[0] = static_cast<uint8_t>((compressedSize >> 0) & 0xffu);
 	chunkSizeBytes[1] = static_cast<uint8_t>((compressedSize >> 8) & 0xffu);
 	chunkSizeBytes[2] = static_cast<uint8_t>((compressedSize >> 16) & 0xffu);
@@ -479,8 +519,12 @@ void CompressionGlobal::WriteToOutput(const void *src, size_t compressedSize, si
 	chunkSizeBytes[5] = static_cast<uint8_t>((uncompressedSize >> 8) & 0xffu);
 	chunkSizeBytes[6] = static_cast<uint8_t>((uncompressedSize >> 16) & 0xffu);
 	chunkSizeBytes[7] = static_cast<uint8_t>((uncompressedSize >> 24) & 0xffu);
+	chunkSizeBytes[8] = static_cast<uint8_t>((crc >> 0) & 0xffu);
+	chunkSizeBytes[9] = static_cast<uint8_t>((crc >> 8) & 0xffu);
+	chunkSizeBytes[10] = static_cast<uint8_t>((crc >> 16) & 0xffu);
+	chunkSizeBytes[11] = static_cast<uint8_t>((crc >> 24) & 0xffu);
 
-	fwrite(chunkSizeBytes, 1, 8, m_outF);
+	fwrite(chunkSizeBytes, 1, 12, m_outF);
 	fwrite(src, 1, compressedSize, m_outF);
 }
 
@@ -551,9 +595,19 @@ private:
 
 CompressionTask::CompressionTask()
 	: m_workUnit(0), m_cglobal(nullptr), m_inputData(nullptr), m_compressedData(nullptr), m_compressedSize(0), m_ctx(nullptr),
-	m_transcodedData(nullptr), m_transcodedSize(0), m_transcodedCapacity(0), m_transcodeReadPos(0), m_encState(nullptr)
+	m_transcodedData(nullptr), m_transcodedSize(0), m_transcodedCapacity(0), m_transcodeReadPos(0), m_encState(nullptr),
+	m_maxCompressedSize(0)
 {
 	m_numLanes = 32;
+
+	m_encoderOutputObj.m_userdata = nullptr;
+	m_encoderOutputObj.m_writeBitstreamFunc = nullptr;
+
+	m_memAlloc.m_userdata = nullptr;
+	m_memAlloc.m_reallocFunc = nullptr;
+
+	m_streamSource.m_readBytesFunc = nullptr;
+	m_streamSource.m_userdata = nullptr;
 }
 
 CompressionTask::~CompressionTask()
@@ -588,7 +642,7 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 	m_streamSource.m_userdata = this;
 	m_streamSource.m_readBytesFunc = CBReadBytes;
 
-	gstd_Encoder_Create(&m_encoderOutputObj, m_numLanes, gstd_ComputeMaxOffsetExtraBits(static_cast<uint32_t>(cglobal->PageSize())), &m_memAlloc, &m_encState);	// TODO: Error check
+	gstd_Encoder_Create(&m_encoderOutputObj, m_numLanes, gstd_ComputeMaxOffsetExtraBits(static_cast<uint32_t>(cglobal->PageSize())), 0, &m_memAlloc, &m_encState);	// TODO: Error check
 }
 
 void CompressionTask::RunWorkUnit(size_t workUnit)
@@ -662,7 +716,9 @@ void CompressionTask::FinishWritingWorkUnit()
 		compressedData = m_inputData;
 	}
 
-	m_cglobal->WriteToOutput(compressedData, compressedSize, currentPageSize);
+	uint32_t crc = crc32(0, m_inputData, currentPageSize);
+
+	m_cglobal->WriteToOutput(compressedData, crc, compressedSize, currentPageSize);
 }
 
 size_t CompressionTask::ComputeCurrentPageSize() const

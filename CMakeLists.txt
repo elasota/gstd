@@ -33,7 +33,9 @@ add_library(zstd STATIC
 
 add_executable(gstdcmd
 	gstd/gstd.cpp
-	gstd/gstddec_kernel_cpp.cpp
+	gstd/gstddec_kernel.cpp
+	gstd/gstddec_kernel_cpp_api.cpp
+	gstd/crc32.c
 	)
 	
 add_subdirectory(modules/zstdhl)

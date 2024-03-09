@@ -10,16 +10,20 @@ the included LICENSE.txt file.
 
 #include "gstddec_proto_cpp.h"
 
-#define GSTDDEC_WAVE_SIZE	TWidth
+#define GSTDDEC_FORMAT_WIDTH		TFormatWidth
+#define GSTDDEC_VECTOR_WIDTH		TVectorWidth
 
-#define GSTDDEC_MAIN_FUNCTION_DEF	\
-	template<unsigned int TWidth>	\
-	void gstddec::DecompressorContext<TWidth>::Run
+#define GSTDDEC_FUNCTION_PREFIX	template<unsigned int TVectorWidth, unsigned int TFormatWidth>
+
+#define GSTDDEC_FUNCTION_CONTEXT gstddec::DecompressorContext<TVectorWidth, TFormatWidth>::
+#define GSTDDEC_TYPE_CONTEXT typename gstddec::DecompressorContext<TVectorWidth, TFormatWidth>::
 
 #define GSTDDEC_READ_CONSTANT(constName)	(this->m_constants.constName)
 
 #define GSTDDEC_READ_INPUT_DWORD(pos) (this->ReadInputDWord(pos))
 
 #define GSTDDEC_VECTOR_UINT32(fillValue) (vuint32_t(fillValue))
+
+#define GSTDDEC_WARN(msg)
 
 #endif

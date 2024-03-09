@@ -35,16 +35,21 @@ namespace gstddec
 		bool m_values[TWidth];
 	};
 
-	template<unsigned int TWidth>
+	template<unsigned int TVectorWidth, unsigned int TFormatWidth>
 	class DecompressorContext
 	{
 	public:
-		typedef VectorUInt<uint32_t, TWidth> vuint32_t;
-		typedef VectorUInt<uint16_t, TWidth> vuint16_t;
-		typedef VectorBool<TWidth> vbool_t;
+		typedef VectorUInt<uint32_t, TVectorWidth> vuint32_t;
+		typedef VectorUInt<uint16_t, TVectorWidth> vuint16_t;
+		typedef VectorBool<TVectorWidth> vbool_t;
+
+		struct DecompressorState;
 
 		DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize);
 
+		void DecompressRawBlock(vuint32_t laneIndex, DecompressorState *dstate);
+		void DecompressRLEBlock(vuint32_t laneIndex, DecompressorState *dstate);
+		void DecompressCompressedBlock(vuint32_t laneIndex, DecompressorState *dstate);
 		void Run(vuint32_t laneIndex);
 
 	private:
@@ -65,8 +70,8 @@ namespace gstddec
 		Constants m_constants;
 	};
 
-	template<unsigned int TWidth>
-	DecompressorContext<TWidth>::DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize)
+	template<unsigned int TVectorWidth, unsigned int TFormatWidth>
+	DecompressorContext<TVectorWidth, TFormatWidth>::DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize)
 		: m_inData(inData), m_inSize(inSize / 4), m_outData(outData), m_outSize(outSize / 4)
 	{
 		m_constants.InSizeDWords = m_inSize;
