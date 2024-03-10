@@ -24,7 +24,7 @@ struct ThreadedTaskWorkerState;
 struct SerializedTaskGlobalState;
 struct SerializedTaskWorkerState;
 
-extern void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity);
+extern void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity, void *warnContext, void (*warnCallback)(void *, const char *));
 extern "C" uint32_t crc32(uint32_t crc, const void *buf, size_t len);
 
 class AutoResetEvent
@@ -334,6 +334,11 @@ void PrintUsageAndQuit()
 	exit(-1);
 }
 
+void DecompressWarn(void *context, const char *str)
+{
+	fprintf(stderr, "Decompressor threw warning for block %i: %s\n", *static_cast<int*>(context), str);
+}
+
 int DecompressMain(int optc, const char **optv, const char *inFileName, const char *outFileName)
 {
 	FILE *inF = fopen(inFileName, "rb");
@@ -441,7 +446,7 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 			std::vector<uint8_t> decompressedPage;
 			decompressedPage.resize(uncompressedSize + 3);
 
-			DecompressGstdCPU32(&compressedPage[0], blockSize, &decompressedPage[0], uncompressedSize);
+			DecompressGstdCPU32(&compressedPage[0], blockSize, &decompressedPage[0], uncompressedSize, &blockIndex, DecompressWarn);
 
 			uint32_t actualCRC = crc32(0, &decompressedPage[0], uncompressedSize);
 			if (actualCRC != expectedCRC)
