@@ -31,6 +31,7 @@ namespace gstddec
 		VectorUInt operator<<(const VectorUInt<TOtherNumber, TWidth> &other) const;
 		VectorUInt operator|(const VectorUInt &other) const;
 		VectorUInt operator&(const VectorUInt &other) const;
+		VectorUInt operator^(const VectorUInt &other) const;
 
 		VectorBool<TWidth> operator<(const VectorUInt &other) const;
 		VectorBool<TWidth> operator<=(const VectorUInt &other) const;
@@ -96,11 +97,16 @@ namespace gstddec
 		void PutOutputDWord(const vuint32_t &dwordPos, const vuint32_t &dword) const;
 		void PutOutputDWord(uint32_t dwordPos, uint32_t dword) const;
 
-		void ConditionalStoreVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
-		void ConditionalStore(vbool_t executionMask, vuint32_t &storage, vuint32_t value);
-		void ConditionalStore(vbool_t executionMask, vuint64_t &storage, vuint64_t value);
+		static vuint32_t FastFillAscending(vuint32_t value, uint32_t &runningValue);
 
-		void ConditionalOrVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
+		static void ConditionalStoreVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
+		static void ConditionalStore(vbool_t executionMask, vuint32_t &storage, vuint32_t value);
+		static void ConditionalStore(vbool_t executionMask, vuint64_t &storage, vuint64_t value);
+
+		static void ConditionalLoadVector(vbool_t executionMask, vuint32_t &value, const uint32_t *storage, vuint32_t index);
+		static void ConditionalLoad(vbool_t executionMask, vuint32_t &value, const vuint32_t &storage);
+
+		static void ConditionalOrVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
 
 		void DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord, DecompressorState &dstate);
 		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord, DecompressorState &dstate);
@@ -112,7 +118,7 @@ namespace gstddec
 		vuint32_t BitstreamPeek(DecompressorState &dstate, uint32_t vvecIndex, vuint32_t laneIndex, uint32_t numBits);
 		void BitstreamDiscard(DecompressorState &dstate, uint32_t vvecIndex, vuint32_t laneIndex, vuint32_t numBits);
 
-		void DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, DecompressorState &dstate);
+		void DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog, DecompressorState &dstate);
 
 		uint32_t ReadRawByte(DecompressorState &dstate);
 
@@ -121,6 +127,7 @@ namespace gstddec
 		static bool WaveActiveAnyTrue(vbool_t value);
 		static vuint32_t WavePrefixCountBits(vbool_t value);
 		static uint32_t WaveReadLaneAt(vuint32_t value, uint32_t index);
+		static vuint32_t WaveReadLaneAt(vuint32_t value, vuint32_t index);
 		static uint32_t FirstTrueIndex(vbool_t value);
 		static uint32_t LastTrueIndex(vbool_t value);
 		static vuint32_t FirstBitHighPlusOne(vuint32_t value);
@@ -131,6 +138,7 @@ namespace gstddec
 		static vuint32_t ArithMax(vuint32_t a, vuint32_t b);
 		static uint32_t ArithMin(uint32_t a, uint32_t b);
 		static uint32_t ArithMax(uint32_t a, uint32_t b);
+		static vuint32_t LaneIndex();
 
 		const uint32_t *m_inData;
 		uint32_t m_inSize;
@@ -310,6 +318,17 @@ namespace gstddec
 
 		for (unsigned int i = 0; i < TWidth; i++)
 			result.m_values[i] = m_values[i] & other.m_values[i];
+
+		return result;
+	}
+
+	template<class TNumber, unsigned int TWidth>
+	VectorUInt<TNumber, TWidth> VectorUInt<TNumber, TWidth>::operator^(const VectorUInt &other) const
+	{
+		VectorUInt<TNumber, TWidth> result;
+
+		for (unsigned int i = 0; i < TWidth; i++)
+			result.m_values[i] = m_values[i] ^ other.m_values[i];
 
 		return result;
 	}

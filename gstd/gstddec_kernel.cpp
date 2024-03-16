@@ -130,7 +130,10 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 	{
 		uint32_t accuracyLog = auxBit + 5;
 
-		DecodeFSETable(laneIndex, GSTDDEC_FSETAB_HUFF_WEIGHT_START, GSTD_MAX_HUFFMAN_WEIGHT, accuracyLog, dstate);
+		DecodeFSETable(laneIndex, GSTDDEC_FSETAB_HUFF_WEIGHT_START, GSTD_MAX_HUFFMAN_WEIGHT, accuracyLog, GSTD_MAX_HUFFMAN_WEIGHT_ACCURACY_LOG, dstate);
+
+		// Decode the actual weights
+		GSTDDEC_WARN("NOT YET IMPLEMENTED");
 	}
 
 	GSTDDEC_FLUSH_GS;
@@ -220,6 +223,17 @@ uint32_t GSTDDEC_FUNCTION_CONTEXT WaveReadLaneAt(vuint32_t value, uint32_t index
 }
 
 GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT WaveReadLaneAt(vuint32_t value, vuint32_t index)
+{
+	vuint32_t result;
+
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+		result.Set(i, value.Get(index.Get(i)));
+
+	return result;
+}
+
+GSTDDEC_FUNCTION_PREFIX
 uint32_t GSTDDEC_FUNCTION_CONTEXT FirstTrueIndex(vbool_t value)
 {
 	for (unsigned int i = 0; i < TVectorWidth; i++)
@@ -257,7 +271,7 @@ GSTDDEC_FUNCTION_PREFIX
 uint32_t GSTDDEC_FUNCTION_CONTEXT FirstBitLowPlusOne(uint32_t value)
 {
 	if (value == 0)
-		return 0;
+		return 1;
 
 	uint32_t result = 0;
 	if ((value & 0xffff) == 0)
@@ -351,6 +365,17 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT ArithMax(vuint32_t a, vu
 
 	for (unsigned int i = 0; i < TVectorWidth; i++)
 		result.Set(i, ArithMax(a.Get(i), b.Get(i)));
+
+	return result;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT LaneIndex()
+{
+	vuint32_t result;
+
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+		result.Set(i, i);
 
 	return result;
 }
@@ -459,20 +484,28 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT BitstreamPeek(GSTDDEC_PA
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, GSTDDEC_PARAM_INOUT(DecompressorState, dstate))
+void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog, GSTDDEC_PARAM_INOUT(DecompressorState, dstate))
 {
 	uint32_t targetProbLimit = (1 << accuracyLog);
-	uint32_t peekSize = accuracyLog + 1 + GSTD_ZERO_PROB_REPEAT_BITS;
+	uint32_t peekSize = maxAccuracyLog + 1 + GSTD_ZERO_PROB_REPEAT_BITS;
 
 	uint32_t leadInCumulativeProb = 0;
 	uint32_t leadInSymbol = 0;
 	uint32_t lastCodedSymbol = 0;
+	uint32_t numSymbols = 0;
 
-	for (uint32_t firstInitLane = 0; firstInitLane <= fseTabMaxSymInclusive; firstInitLane++)
+	for (uint32_t firstInitLane = 0; firstInitLane < targetProbLimit; firstInitLane += GSTDDEC_VECTOR_WIDTH)
 	{
 		vuint32_t slotIndex = GSTDDEC_VECTOR_UINT32(firstInitLane) + laneIndex;
 
-		GSTDDEC_VECTOR_IF(slotIndex <= GSTDDEC_VECTOR_UINT32(fseTabMaxSymInclusive))
+		vbool_t isInBounds = GSTDDEC_VECTOR_BOOL(true);
+
+		if (GSTDDEC_VECTOR_WIDTH > 32)
+		{
+			isInBounds = (slotIndex < GSTDDEC_VECTOR_UINT32(targetProbLimit));
+		}
+
+		GSTDDEC_VECTOR_IF(isInBounds)
 		{
 			GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.probTemps, slotIndex, GSTDDEC_VECTOR_UINT32(0));
 		}
@@ -517,14 +550,21 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTa
 
 						GSTDDEC_VECTOR_IF(overflowed)
 						{
-							GSTDDEC_CONDITIONAL_STORE(bitMasks, GSTDDEC_VECTOR_UINT32((1 << reducedPrecision) - 1));
+							uint32_t reducedPrecMask = (1 << reducedPrecision) - 1;
+							GSTDDEC_CONDITIONAL_STORE(bitMasks, GSTDDEC_VECTOR_UINT32(reducedPrecMask));
 
+#if GSTDDEC_SANITIZE
+							// Cap the value in the first overflowing lane at the maximum allowed value
 							GSTDDEC_VECTOR_IF_NESTED(laneIndex == GSTDDEC_VECTOR_UINT32(firstOverflowingLaneIndex))
 							{
-								// On normal data, this should never do anything, but bad data can cause an infinite loop otherwise here
+								if ((GSTDDEC_VECTOR_READ_FROM_INDEX(probs, firstOverflowingLaneIndex) & reducedPrecMask) > probLimitInOverflowingLane)
+								{
+									GSTDDEC_WARN("Probability table had an overflowing entry that is still overflowing after bit reduction");
+								}
 								GSTDDEC_CONDITIONAL_STORE(probs, GSTDDEC_MIN((probs & bitMasks), GSTDDEC_VECTOR_UINT32(probLimitInOverflowingLane)));
 							}
 							GSTDDEC_VECTOR_END_IF_NESTED
+#endif
 						}
 						GSTDDEC_VECTOR_END_IF
 					}
@@ -536,29 +576,61 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTa
 				vuint32_t vectorMaxProb = GSTDDEC_VECTOR_UINT32(targetProbLimit) - leadInProbs;
 				vuint32_t probBitUsage = GSTDDEC_NEXT_LOG2_POWER(vectorMaxProb);
 
-				vuint32_t slotUsage = GSTDDEC_VECTOR_UINT32(1);
+				vuint32_t symbolUsage = GSTDDEC_VECTOR_UINT32(1);
 
 				GSTDDEC_VECTOR_IF(GSTDDEC_VECTOR_LOGICAL_AND(vectorMaxProb != GSTDDEC_VECTOR_UINT32(0), probs == GSTDDEC_VECTOR_UINT32(0)))
 				{
 					uint32_t zeroRepeatMask = ((1 << GSTD_ZERO_PROB_REPEAT_BITS) - 1);
 					vuint32_t zeroRepeatCount = (probBits >> probBitUsage) & GSTDDEC_VECTOR_UINT32(zeroRepeatMask);
-					GSTDDEC_CONDITIONAL_STORE(slotUsage, slotUsage + zeroRepeatCount);
+					GSTDDEC_CONDITIONAL_STORE(symbolUsage, symbolUsage + zeroRepeatCount);
 					GSTDDEC_CONDITIONAL_STORE(probBitUsage, probBitUsage + GSTDDEC_VECTOR_UINT32(GSTD_ZERO_PROB_REPEAT_BITS));
 				}
 				GSTDDEC_VECTOR_END_IF
 
 				BitstreamDiscard(dstate, vvecIndex, laneIndex, probBitUsage);
 
-				// Store out
-				// TODO: Generate sequential tables for running sums here
-				vuint32_t symbol = GSTDDEC_VECTOR_UINT32(leadInSymbol) + GSTDDEC_EXCLUSIVE_RUNNING_SUM(slotUsage);
-				GSTDDEC_VECTOR_IF(symbol <= GSTDDEC_VECTOR_UINT32(symbol))
+				// Determine symbols
+				vuint32_t symbol = GSTDDEC_VECTOR_UINT32(leadInSymbol) + GSTDDEC_EXCLUSIVE_RUNNING_SUM(symbolUsage);
+				vuint32_t symbolTablePass1SlotUsage = GSTDDEC_VECTOR_UINT32(0);
+				vbool_t isNonZeroProbability = GSTDDEC_VECTOR_LOGICAL_AND(symbol <= GSTDDEC_VECTOR_UINT32(fseTabMaxSymInclusive), probs != GSTDDEC_VECTOR_UINT32(0));
+				GSTDDEC_VECTOR_IF(isNonZeroProbability)
 				{
-					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.probTemps, symbol, GSTDDEC_VECTOR_UINT32(0));
+					GSTDDEC_CONDITIONAL_STORE(symbolTablePass1SlotUsage, probs);
+
+					vuint32_t highUsageStartIndex = GSTDDEC_VECTOR_UINT32(numSymbols) + GSTDDEC_EXCLUSIVE_RUNNING_SUM(symbolTablePass1SlotUsage);
+
+					vuint32_t bitsForProbRoundedUp = GSTDDEC_NEXT_LOG2_POWER(probs - GSTDDEC_VECTOR_UINT32(1));
+					vuint32_t probNumericRangeRoundedToNextPO2 = (GSTDDEC_VECTOR_UINT32(1) << bitsForProbRoundedUp);
+
+					vuint32_t highBitUsage = GSTDDEC_VECTOR_UINT32(accuracyLog + 1) - bitsForProbRoundedUp;
+
+					//vuint32_t highBitUsage = GSTDDEC_NEXT_LOG2_POWER(probs - GSTDDEC_VECTOR_UINT32(1));
+					vuint32_t numHighBitUsage = probNumericRangeRoundedToNextPO2 - probs;
+					vuint32_t numLowBitUsage = probs - numHighBitUsage;
+
+					vuint32_t highUsageBaselineOffset = probs - (probNumericRangeRoundedToNextPO2 >> GSTDDEC_VECTOR_UINT32(1));
+
+					vuint32_t highBitUsageBaselineZeroPoint = highUsageStartIndex - highUsageBaselineOffset;
+
+					vuint32_t lowBitUsage = highBitUsage - GSTDDEC_VECTOR_UINT32(1);
+					vuint32_t lowUsageStartIndex = highUsageStartIndex + numHighBitUsage;
+					vuint32_t lowUsageBaselineZeroPoint = lowUsageStartIndex;
+
+					// Bit-pack into ascending-order values.
+					vuint32_t combinedValueLow = (symbol << GSTDDEC_VECTOR_UINT32(24)) | (lowBitUsage << GSTDDEC_VECTOR_UINT32(16)) | lowUsageBaselineZeroPoint;
+					vuint32_t combinedValueHigh = (symbol << GSTDDEC_VECTOR_UINT32(24)) | (highBitUsage << GSTDDEC_VECTOR_UINT32(16)) | (highBitUsageBaselineZeroPoint & GSTDDEC_VECTOR_UINT32(0xffff));
+
+#if !GSTDDEC_SUPPORT_FAST_SEQUENTIAL_FILL
+					combinedValueLow = combinedValueLow ^ GSTDDEC_VECTOR_UINT32(0x00ff0000);
+					combinedValueHigh = combinedValueHigh ^ GSTDDEC_VECTOR_UINT32(0x00ff0000);
+#endif
+					
+					// High start and low start may be the same, but will never overlap other writes, so this should be OK.
+					// Low usage takes priority, since in the PO2 case, high count will be zero
+					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.probTemps, highUsageStartIndex, combinedValueHigh);
+					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.probTemps, lowUsageStartIndex, combinedValueLow);
 				}
 				GSTDDEC_VECTOR_END_IF
-
-				vbool_t isNonZeroProbability = (probs != GSTDDEC_VECTOR_UINT32(0));
 
 				if (GSTDDEC_VECTOR_ANY(isNonZeroProbability))
 				{
@@ -566,9 +638,59 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTa
 				}
 
 				leadInCumulativeProb += GSTDDEC_SUM(probs);
-				leadInSymbol += GSTDDEC_SUM(slotUsage);
+				leadInSymbol += GSTDDEC_SUM(symbolUsage);
+				numSymbols += GSTDDEC_SUM(symbolTablePass1SlotUsage);
 			}
 		}
+	}
+
+	GSTDDEC_FLUSH_GS;
+
+	if (leadInCumulativeProb < targetProbLimit)
+	{
+		GSTDDEC_WARN("Probability table didn't fill all probs");
+	}
+
+	// Expand probs table
+	uint32_t leadInTemp = 0;
+	uint32_t advanceStep = (5 << (accuracyLog - 3)) + 3;
+
+	for (uint32_t firstFillLane = 0; firstFillLane < targetProbLimit; firstFillLane += GSTDDEC_VECTOR_WIDTH)
+	{
+		vuint32_t slotIndex = GSTDDEC_VECTOR_UINT32(firstFillLane) + laneIndex;
+
+		vbool_t isInBounds = GSTDDEC_VECTOR_BOOL(true);
+
+		if (GSTDDEC_VECTOR_WIDTH > 32)
+		{
+			isInBounds = (slotIndex < GSTDDEC_VECTOR_UINT32(targetProbLimit));
+		}
+
+		vuint32_t probTemp = GSTDDEC_VECTOR_UINT32(0);
+		GSTDDEC_VECTOR_IF(isInBounds)
+		{
+			GSTDDEC_CONDITIONAL_LOAD_INDEX(probTemp, gs_decompressorState.probTemps, slotIndex);
+		}
+		GSTDDEC_VECTOR_END_IF
+
+#if GSTDDEC_SUPPORT_FAST_SEQUENTIAL_FILL
+#error "NYI"
+#else
+		probTemp = FastFillAscending(probTemp, leadInTemp) ^ GSTDDEC_VECTOR_UINT32(0x00ff0000);
+#endif
+
+		// Compute actual baseline
+		vuint32_t numBits = (probTemp & GSTDDEC_VECTOR_UINT32(0xff0000)) >> GSTDDEC_VECTOR_UINT32(16);
+		vuint32_t adjustedBaseline = ((slotIndex - probTemp) & GSTDDEC_VECTOR_UINT32(0xffff)) << numBits;
+		probTemp = (probTemp & GSTDDEC_VECTOR_UINT32(0xffff0000)) | adjustedBaseline;
+
+		GSTDDEC_VECTOR_IF(isInBounds)
+		{
+			vuint32_t placementIndex = (slotIndex * GSTDDEC_VECTOR_UINT32(advanceStep));
+
+			GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.fseCells, placementIndex + GSTDDEC_VECTOR_UINT32(fseTabStart), probTemp);
+		}
+		GSTDDEC_VECTOR_END_IF
 	}
 
 	GSTDDEC_FLUSH_GS;
@@ -681,13 +803,45 @@ void GSTDDEC_FUNCTION_CONTEXT PutOutputDWord(uint32_t dwordPos, uint32_t dword) 
 		m_outData[dwordPos] = dword;
 }
 
+// This fills all zero values in a vuint32_t with the preceding value, and the preceding value must be less
+GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT FastFillAscending(vuint32_t value, GSTDDEC_PARAM_INOUT(uint32_t, runningFillValue))
+{
+#if GSTDDEC_SUPPORT_FAST_SEQUENTIAL_FILL
+#error "NYI"
+#else
+	value = GSTDDEC_MAX(value, GSTDDEC_VECTOR_UINT32(runningFillValue));
+
+	GSTDDEC_UNROLL_HINT
+	for (uint32_t backDistance = 1; backDistance < GSTDDEC_VECTOR_WIDTH; backDistance <<= 1)
+	{
+		vuint32_t altIndex = (GSTDDEC_LANE_INDEX - GSTDDEC_VECTOR_UINT32(backDistance));
+
+#ifdef __cplusplus
+		// Don't support conditional WaveReadLaneAt, just do this instead
+		altIndex = (altIndex & GSTDDEC_VECTOR_UINT32(GSTDDEC_VECTOR_WIDTH - 1));
+#endif
+
+		GSTDDEC_VECTOR_IF(GSTDDEC_VECTOR_UINT32(backDistance) <= GSTDDEC_LANE_INDEX)
+		{
+			GSTDDEC_CONDITIONAL_STORE(value, GSTDDEC_MAX(value, GSTDDEC_VECTOR_READ_FROM_INDEX(value, altIndex)));
+		}
+		GSTDDEC_VECTOR_END_IF
+	}
+
+	runningFillValue = GSTDDEC_VECTOR_READ_FROM_INDEX(value, GSTDDEC_VECTOR_WIDTH - 1);
+#endif
+
+	return value;
+}
+
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT ConditionalStoreVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value)
 {
 	for (unsigned int i = 0; i < TVectorWidth; i++)
 	{
 		if (executionMask.Get(i))
-			storage[i] = value.Get(i);
+			storage[index.Get(i)] = value.Get(i);
 	}
 }
 
@@ -708,6 +862,27 @@ void GSTDDEC_FUNCTION_CONTEXT ConditionalStore(vbool_t executionMask, vuint64_t 
 	{
 		if (executionMask.Get(i))
 			storage.Set(i, value.Get(i));
+	}
+}
+
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ConditionalLoadVector(vbool_t executionMask, vuint32_t &value, const uint32_t *storage, vuint32_t index)
+{
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+	{
+		if (executionMask.Get(i))
+			value.Set(i, storage[index.Get(i)]);
+	}
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ConditionalLoad(vbool_t executionMask, vuint32_t &value, const vuint32_t &storage)
+{
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+	{
+		if (executionMask.Get(i))
+			value.Set(i, storage.Get(i));
 	}
 }
 

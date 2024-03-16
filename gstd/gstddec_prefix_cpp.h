@@ -55,6 +55,9 @@ the included LICENSE.txt file.
 #define GSTDDEC_BRANCH_HINT
 #define GSTDDEC_UNROLL_HINT
 
+#define GSTDDEC_CONDITIONAL_LOAD(value, storage) ConditionalLoad(executionMask, (value), (storage))
+#define GSTDDEC_CONDITIONAL_LOAD_INDEX(value, storage, index) ConditionalLoadVector(executionMask, (value), (storage), (index))
+
 #define GSTDDEC_CONDITIONAL_STORE(storage, value) ConditionalStore(executionMask, (storage), (value))
 #define GSTDDEC_CONDITIONAL_STORE_INDEX(storage, index, value) ConditionalStoreVector(executionMask, (storage), (index), (value))
 
@@ -68,5 +71,14 @@ the included LICENSE.txt file.
 #define GSTDDEC_EXCLUSIVE_RUNNING_SUM(value) (WavePrefixSum(value))
 #define GSTDDEC_MIN(a, b) (ArithMin((a), (b)))
 #define GSTDDEC_MAX(a, b) (ArithMax((a), (b)))
+
+#define GSTDDEC_SANITIZE						1
+#define GSTDDEC_SUPPORT_FAST_SEQUENTIAL_FILL	0
+
+#define GSTDDEC_PASS_EXECUTION_MASK executionMask,
+
+#define GSTDDEC_PARAM_EXECUTION_MASK vbool_t executionMask,
+
+#define GSTDDEC_LANE_INDEX (LaneIndex())
 
 #endif
