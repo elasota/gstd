@@ -686,7 +686,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(vuint32_t laneIndex, uint32_t fseTa
 
 		GSTDDEC_VECTOR_IF(isInBounds)
 		{
-			vuint32_t placementIndex = (slotIndex * GSTDDEC_VECTOR_UINT32(advanceStep));
+			vuint32_t placementIndex = ((slotIndex * GSTDDEC_VECTOR_UINT32(advanceStep)) & GSTDDEC_VECTOR_UINT32(targetProbLimit - 1));
 
 			GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.fseCells, placementIndex + GSTDDEC_VECTOR_UINT32(fseTabStart), probTemp);
 		}
