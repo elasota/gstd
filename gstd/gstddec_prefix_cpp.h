@@ -81,4 +81,6 @@ the included LICENSE.txt file.
 
 #define GSTDDEC_LANE_INDEX (LaneIndex())
 
+#define GSTDDEC_TWEAK_NO_SCATTER				0
+
 #endif

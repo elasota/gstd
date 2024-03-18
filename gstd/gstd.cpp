@@ -330,6 +330,7 @@ void PrintUsageAndQuit()
 	fprintf(stderr, "    -level <level>   - Sets compression level (default is 9)\n");
 	fprintf(stderr, "    -t <threads>     - Sets maximum thread count\n");
 	fprintf(stderr, "    -f <path>        - Sets path to output failed blocks to (for debugging)\n");
+	fprintf(stderr, "    -nofseshuffle    - Disables FSE table shuffling\n");
 
 	exit(-1);
 }
@@ -470,7 +471,7 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, const char *failBlockPath);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
@@ -479,6 +480,7 @@ public:
 	size_t PageSize() const;
 	size_t GlobalSize() const;
 	unsigned int CompressionLevel() const;
+	uint32_t Tweaks() const;
 	const char* FailBlockPath() const;
 
 private:
@@ -495,11 +497,12 @@ private:
 	size_t m_numPages;
 
 	unsigned int m_compressionLevel;
+	uint32_t m_tweaks;
 	const char* m_failBlockPath;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, const char* failBlockPath)
-	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize), m_compressionLevel(compressionLevel), m_failBlockPath(failBlockPath)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char* failBlockPath)
+	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize), m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
 {
 }
 
@@ -552,6 +555,11 @@ size_t CompressionGlobal::GlobalSize() const
 unsigned int CompressionGlobal::CompressionLevel() const
 {
 	return m_compressionLevel;
+}
+
+unsigned int CompressionGlobal::Tweaks() const
+{
+	return m_tweaks;
 }
 
 const char* CompressionGlobal::FailBlockPath() const
@@ -647,7 +655,7 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 	m_streamSource.m_userdata = this;
 	m_streamSource.m_readBytesFunc = CBReadBytes;
 
-	gstd_Encoder_Create(&m_encoderOutputObj, m_numLanes, gstd_ComputeMaxOffsetExtraBits(static_cast<uint32_t>(cglobal->PageSize())), 0, &m_memAlloc, &m_encState);	// TODO: Error check
+	gstd_Encoder_Create(&m_encoderOutputObj, m_numLanes, gstd_ComputeMaxOffsetExtraBits(static_cast<uint32_t>(cglobal->PageSize())), m_cglobal->Tweaks(), &m_memAlloc, &m_encState);	// TODO: Error check
 }
 
 void CompressionTask::RunWorkUnit(size_t workUnit)
@@ -791,6 +799,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	unsigned int pageSize = 64 * 1024;
 	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
 	const char* failBlockPath = "";
+	uint32_t tweaks = 0;
 
 	for (int i = 0; i < optc; i++)
 	{
@@ -832,6 +841,10 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 				fprintf(stderr, "Invalid level for -level");
 				return -1;
 			}
+		}
+		else if (!strcmp(optName, "-nofseshuffle"))
+		{
+			tweaks |= GSTD_TWEAK_NO_FSE_TABLE_SHUFFLE;
 		}
 		else
 		{
@@ -897,7 +910,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, failBlockPath);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath);
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 
