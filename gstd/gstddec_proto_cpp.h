@@ -108,19 +108,26 @@ namespace gstddec
 
 		static void ConditionalOrVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
 
-		void DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord, DecompressorState &dstate);
-		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord, DecompressorState &dstate);
-		void DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord, DecompressorState &dstate);
-		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit, DecompressorState &dstate);
-		void DecodeLitRLEByte(DecompressorState &dstate);
-		uint32_t ReadPackedSize(DecompressorState &dstate);
+		void DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord);
+		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord);
+		void DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord);
+		void ClearLitHuffmanTree();
+		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit);
+		void ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal);
+		void DecodeFSEHuffmanWeights(uint32_t numSpecifiedWeights, uint32_t accuracyLog, uint32_t &huffmanWeightTotal);
+		void DecodeLitRLEByte();
+		uint32_t ReadPackedSize();
 
-		vuint32_t BitstreamPeek(DecompressorState &dstate, uint32_t vvecIndex, vuint32_t laneIndex, uint32_t numBits);
-		void BitstreamDiscard(DecompressorState &dstate, uint32_t vvecIndex, vuint32_t laneIndex, vuint32_t numBits);
+		vuint32_t BitstreamPeekNoTruncate(uint32_t vvecIndex, uint32_t numLanesToLoad, uint32_t numBits);
+		vuint32_t BitstreamPeek(uint32_t vvecIndex, uint32_t numLanesToLoad, uint32_t numBits);
+		void BitstreamDiscard(uint32_t vvecIndex, uint32_t numLanesToDiscard, vuint32_t numBits);
 
-		void DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog, DecompressorState &dstate);
+		void DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog);
 
-		uint32_t ReadRawByte(DecompressorState &dstate);
+		// This decodes a number of FSE values, all non-decoded values are filled with zero
+		vuint32_t DecodeFSEValue(uint32_t numLanesToRefill, uint32_t vvecIndex, uint32_t accuracyLog, uint32_t firstCell);
+
+		uint32_t ReadRawByte();
 
 		static vuint32_t WavePrefixSum(vuint32_t value);
 		static uint32_t WaveSum(vuint32_t value);
@@ -151,6 +158,7 @@ namespace gstddec
 		WarnCallback_t m_warnCallback;
 
 		GroupSharedDecompressorState gs_decompressorState;
+		DecompressorState g_dstate;
 	};
 
 	template<unsigned int TVectorWidth, unsigned int TFormatWidth>
