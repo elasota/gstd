@@ -13,6 +13,9 @@ the included LICENSE.txt file.
 
 //GSTDDEC_MAIN_FUNCTION_DEF(vuint32_t laneIndex)
 
+#define GSTDDEC_NUMERIC_STARTS_VVEC_SIZE ((GSTD_MAX_HUFFMAN_WEIGHT + GSTDDEC_VECTOR_WIDTH) / GSTDDEC_VECTOR_WIDTH)
+
+
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord)
 {
@@ -134,6 +137,66 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSEHuffmanWeights(uint32_t numSpecifiedWeigh
 	GSTDDEC_FLUSH_GS;
 }
 
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ResolvePackedAddress4(vuint32_t index, GSTDDEC_PARAM_OUT(vuint32_t, outDWordIndex), GSTDDEC_PARAM_OUT(vuint32_t, outBitPos), GSTDDEC_PARAM_OUT(uint32_t, outMask))
+{
+	outDWordIndex = index >> GSTDDEC_VECTOR_UINT32(3);
+	outBitPos = (index & GSTDDEC_VECTOR_UINT32(7)) << GSTDDEC_VECTOR_UINT32(2);
+	outMask = 0xf;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ResolvePackedAddress8(vuint32_t index, GSTDDEC_PARAM_OUT(vuint32_t, outDWordIndex), GSTDDEC_PARAM_OUT(vuint32_t, outBitPos), GSTDDEC_PARAM_OUT(uint32_t, outMask))
+{
+	outDWordIndex = index >> GSTDDEC_VECTOR_UINT32(2);
+	outBitPos = (index & GSTDDEC_VECTOR_UINT32(3)) << GSTDDEC_VECTOR_UINT32(3);
+	outMask = 0xff;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT StoreHuffmanLookupCodes(GSTDDEC_PARAM_EXECUTION_MASK vuint32_t tableIndex, vuint32_t symbol, uint32_t length)
+{
+	vbool_t isInBounds = GSTDDEC_VECTOR_BOOL(true);
+
+#if GSTDDEC_SANITIZE
+	GSTDDEC_VECTOR_IF_NESTED(tableIndex >= GSTDDEC_VECTOR_UINT32(1 << GSTD_MAX_HUFFMAN_CODE_LENGTH))
+	{
+		GSTDDEC_CONDITIONAL_STORE(isInBounds, GSTDDEC_VECTOR_BOOL(false));
+	}
+	GSTDDEC_VECTOR_END_IF_NESTED
+
+	if (!GSTDDEC_VECTOR_ALL(isInBounds))
+	{
+		GSTDDEC_WARN("Huffman symbol index was out of range");
+	}
+	length = GSTDDEC_MIN(length, GSTD_MAX_HUFFMAN_CODE_LENGTH);
+#endif
+
+	GSTDDEC_VECTOR_IF_NESTED(isInBounds)
+	{
+		vuint32_t clusterPos = (tableIndex >> GSTDDEC_VECTOR_UINT32(3)) * GSTDDEC_VECTOR_UINT32(3);
+		vuint32_t clusterInternalOffset = tableIndex & GSTDDEC_VECTOR_UINT32(7);
+
+		GSTDDEC_CONDITIONAL_OR_INDEX(gs_decompressorState.huffmanDecTable, clusterPos, GSTDDEC_VECTOR_UINT32(length) << (clusterInternalOffset << GSTDDEC_VECTOR_UINT32(2)));
+
+		vuint32_t symbolPos = clusterPos + GSTDDEC_VECTOR_UINT32(1) + (clusterInternalOffset >> GSTDDEC_VECTOR_UINT32(2));
+		vuint32_t symbolBitPos = (clusterInternalOffset & GSTDDEC_VECTOR_UINT32(3)) << GSTDDEC_VECTOR_UINT32(3);
+		GSTDDEC_CONDITIONAL_OR_INDEX(gs_decompressorState.huffmanDecTable, symbolPos, symbol << symbolBitPos);
+	}
+	GSTDDEC_VECTOR_END_IF_NESTED
+
+	for (uint32_t i = 0; i < GSTDDEC_VECTOR_WIDTH; i++)
+	{
+		uint32_t ti = tableIndex.Get(i);
+		if (ti < (1 << GSTD_MAX_HUFFMAN_CODE_LENGTH))
+		{
+			m_huffmanDebug[ti].m_symbol = symbol.Get(i);
+			m_huffmanDebug[ti].m_length = length;
+		}
+	}
+}
+
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT ClearLitHuffmanTree()
 {
@@ -154,10 +217,265 @@ void GSTDDEC_FUNCTION_CONTEXT ClearLitHuffmanTree()
 	GSTDDEC_FLUSH_GS;
 }
 
-
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal)
 {
+	uint32_t weightBits = GSTDDEC_NEXT_LOG2_POWER(weightTotal);
+
+	// TODO: Check for weightTotal == 0
+#if GSTDDEC_SANITIZE
+	if (weightBits > GSTD_MAX_HUFFMAN_CODE_LENGTH)
+	{
+		GSTDDEC_WARN("Maximum Huffman code length exceeded");
+	}
+#endif
+
+	uint32_t remainingBitSpace = (1 << weightBits) - weightTotal;
+	uint32_t unspecifiedWeight = GSTDDEC_NEXT_LOG2_POWER(remainingBitSpace);
+
+	for (uint32_t firstPackedWeightCount = 0; firstPackedWeightCount < GSTDDEC_NUM_PACKED_HUFFMAN_WEIGHT_DWORDS; firstPackedWeightCount += GSTDDEC_VECTOR_WIDTH)
+	{
+		vuint32_t writeIndex = GSTDDEC_VECTOR_UINT32(firstPackedWeightCount) + GSTDDEC_LANE_INDEX;
+
+		GSTDDEC_VECTOR_IF(writeIndex < GSTDDEC_VECTOR_UINT32(GSTDDEC_NUM_PACKED_HUFFMAN_WEIGHT_DWORDS))
+		{
+			GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.packedHuffmanWeightCounts, writeIndex, GSTDDEC_VECTOR_UINT32(0));
+		}
+		GSTDDEC_VECTOR_END_IF
+	}
+
+	uint32_t numEncodedClusters = ((1 << GSTDDEC_MAX(weightBits, GSTD_MAX_HUFFMAN_CODE_LENGTH)) + 3) / 4;
+	uint32_t numDecodeTableDWords = numEncodedClusters * 3;
+
+	for (uint32_t firstPackedDecDWord = 0; firstPackedDecDWord < numDecodeTableDWords; firstPackedDecDWord += GSTDDEC_VECTOR_WIDTH)
+	{
+		vuint32_t writeIndex = GSTDDEC_VECTOR_UINT32(firstPackedDecDWord) + GSTDDEC_LANE_INDEX;
+
+		GSTDDEC_VECTOR_IF(writeIndex < GSTDDEC_VECTOR_UINT32(numDecodeTableDWords))
+		{
+			GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.huffmanDecTable, writeIndex, GSTDDEC_VECTOR_UINT32(0));
+		}
+		GSTDDEC_VECTOR_END_IF
+	}
+
+	GSTDDEC_FLUSH_GS;
+
+	for (uint32_t firstPackedWeight = 0; firstPackedWeight < numSpecifiedWeights; firstPackedWeight += GSTDDEC_VECTOR_WIDTH)
+	{
+		vuint32_t weightIndex = GSTDDEC_VECTOR_UINT32(firstPackedWeight) + GSTDDEC_LANE_INDEX;
+
+		GSTDDEC_VECTOR_IF(weightIndex < GSTDDEC_VECTOR_UINT32(numSpecifiedWeights))
+		{
+			vuint32_t readIndex = (weightIndex >> GSTDDEC_VECTOR_UINT32(3));
+			vuint32_t bitPos = (weightIndex & GSTDDEC_VECTOR_UINT32(7)) << GSTDDEC_VECTOR_UINT32(2);
+
+			vuint32_t packedWeight = GSTDDEC_VECTOR_UINT32(0);
+			GSTDDEC_CONDITIONAL_LOAD_INDEX(packedWeight, gs_decompressorState.packedHuffmanWeights, readIndex);
+			packedWeight = (packedWeight >> bitPos) & GSTDDEC_VECTOR_UINT32(15);
+
+			vuint32_t incIndex = (packedWeight >> GSTDDEC_VECTOR_UINT32(2));
+			vuint32_t incValue = (GSTDDEC_VECTOR_UINT32(1) << ((packedWeight & GSTDDEC_VECTOR_UINT32(3)) << GSTDDEC_VECTOR_UINT32(3)));
+
+			GSTDDEC_CONDITIONAL_ADD_INDEX(gs_decompressorState.packedHuffmanWeightCounts, incIndex, incValue);
+		}
+		GSTDDEC_VECTOR_END_IF
+	}
+
+	GSTDDEC_FLUSH_GS;
+
+	// Find the numeric range start positions
+
+	// NOTE: This skips weight 0!
+	vuint32_t weightNumericStarts[GSTDDEC_NUMERIC_STARTS_VVEC_SIZE];
+
+	for (uint32_t wneIndex = 0; wneIndex < GSTDDEC_NUMERIC_STARTS_VVEC_SIZE; wneIndex++)
+		weightNumericStarts[wneIndex] = GSTDDEC_VECTOR_UINT32(0);
+
+	uint32_t weightStartRunningIterator = 0;
+
+	GSTDDEC_UNROLL_HINT
+		for (uint32_t weightBlockIndex = 0; weightBlockIndex < GSTD_MAX_HUFFMAN_WEIGHT; weightBlockIndex += GSTDDEC_VECTOR_WIDTH)
+		{
+			vuint32_t weightMinusOne = GSTDDEC_VECTOR_UINT32(weightBlockIndex * GSTDDEC_VECTOR_WIDTH) + GSTDDEC_LANE_INDEX;
+			vuint32_t weight = weightMinusOne + GSTDDEC_VECTOR_UINT32(1);
+
+			vuint32_t numericUsage = GSTDDEC_VECTOR_UINT32(0);
+
+			GSTDDEC_VECTOR_IF(weight <= GSTDDEC_VECTOR_UINT32(GSTD_MAX_HUFFMAN_WEIGHT))
+			{
+				vuint32_t countDWordIndex = GSTDDEC_VECTOR_UINT32(0);
+				vuint32_t countBitPos = GSTDDEC_VECTOR_UINT32(0);
+				uint32_t countMask = 0;
+
+				ResolvePackedAddress8(weight, countDWordIndex, countBitPos, countMask);
+				vuint32_t count = GSTDDEC_VECTOR_UINT32(0);
+
+				GSTDDEC_CONDITIONAL_LOAD_INDEX(count, gs_decompressorState.packedHuffmanWeightCounts, countDWordIndex);
+				count = (count >> countBitPos) & GSTDDEC_VECTOR_UINT32(countMask);
+
+				GSTDDEC_CONDITIONAL_STORE(numericUsage, count << weightMinusOne);
+			}
+			GSTDDEC_VECTOR_END_IF
+
+				// This handles the case where the remaining bit space is a bad value
+				GSTDDEC_VECTOR_IF(weight == GSTDDEC_VECTOR_UINT32(unspecifiedWeight))
+			{
+				GSTDDEC_CONDITIONAL_STORE(numericUsage, numericUsage + GSTDDEC_VECTOR_UINT32(remainingBitSpace));
+			}
+			GSTDDEC_VECTOR_END_IF
+
+				weightNumericStarts[weightBlockIndex] = GSTDDEC_VECTOR_UINT32(weightStartRunningIterator) + GSTDDEC_EXCLUSIVE_RUNNING_SUM(numericUsage);
+			weightStartRunningIterator += GSTDDEC_SUM(numericUsage);
+		}
+
+	uint32_t upperPaddingBits = 32 - weightBits;
+
+	for (uint32_t firstSymbol = 0; firstSymbol < numSpecifiedWeights; firstSymbol += GSTDDEC_VECTOR_WIDTH)
+	{
+		vuint32_t symbol = GSTDDEC_VECTOR_UINT32(firstSymbol) + GSTDDEC_LANE_INDEX;
+
+		vuint32_t weightDWordIndex = GSTDDEC_VECTOR_UINT32(0);
+		vuint32_t weightBitPos = GSTDDEC_VECTOR_UINT32(0);
+		uint32_t weightMask = 0;
+
+		ResolvePackedAddress4(symbol, weightDWordIndex, weightBitPos, weightMask);
+		vuint32_t weight = GSTDDEC_VECTOR_UINT32(0);
+
+		GSTDDEC_VECTOR_IF(symbol < GSTDDEC_VECTOR_UINT32(numSpecifiedWeights))
+		{
+			GSTDDEC_CONDITIONAL_LOAD_INDEX(weight, gs_decompressorState.packedHuffmanWeights, weightDWordIndex);
+			weight = (weight >> weightBitPos) & GSTDDEC_VECTOR_UINT32(weightMask);
+		}
+		GSTDDEC_VECTOR_END_IF
+
+		while (GSTDDEC_VECTOR_ANY(weight != GSTDDEC_VECTOR_UINT32(0)))
+		{
+			uint32_t firstCodedWeight = GSTDDEC_VECTOR_READ_FROM_INDEX(weight, GSTDDEC_VECTOR_FIRST_TRUE_INDEX(weight != GSTDDEC_VECTOR_UINT32(0)));
+
+			vbool_t isExpectedWeight = (weight == GSTDDEC_VECTOR_UINT32(firstCodedWeight));
+
+			uint32_t wns = 0;
+			uint32_t firstCodedWeightMinusOne = firstCodedWeight - 1;
+			uint32_t expectedWNSIndex = firstCodedWeightMinusOne / GSTDDEC_VECTOR_WIDTH;
+			uint32_t wnsLaneIndex = firstCodedWeightMinusOne % GSTDDEC_VECTOR_WIDTH;
+			uint32_t numTableEntries = 1 << firstCodedWeightMinusOne;
+			uint32_t codeLength = weightBits - firstCodedWeightMinusOne;
+
+			GSTDDEC_UNROLL_HINT
+			for (uint32_t wnsIndex = 0; wnsIndex < GSTDDEC_NUMERIC_STARTS_VVEC_SIZE; wnsIndex++)
+			{
+				if (wnsIndex == expectedWNSIndex)
+					wns = GSTDDEC_VECTOR_READ_FROM_INDEX(weightNumericStarts[wnsIndex], wnsLaneIndex);
+			}
+
+			uint32_t numValuesToBroadcast = GSTDDEC_VECTOR_NUM_TRUE(isExpectedWeight);
+
+			GSTDDEC_BRANCH_HINT
+			if (numTableEntries >= numValuesToBroadcast)
+			{
+				// Vector broadcast fill
+				while (GSTDDEC_VECTOR_ANY(isExpectedWeight))
+				{
+					uint32_t laneToFlush = GSTDDEC_VECTOR_FIRST_TRUE_INDEX(weight == GSTDDEC_VECTOR_UINT32(firstCodedWeight));
+					uint32_t laneSymbol = firstSymbol + laneToFlush;
+
+					uint32_t insertStart = wns;
+					wns += numTableEntries;
+
+					for (uint32_t writeOffsetStart = 0; writeOffsetStart < numTableEntries; writeOffsetStart += GSTDDEC_VECTOR_WIDTH)
+					{
+						vuint32_t numericSpacePos = GSTDDEC_VECTOR_UINT32(insertStart) + GSTDDEC_VECTOR_UINT32(writeOffsetStart) + GSTDDEC_LANE_INDEX;
+						vuint32_t tablePos = GSTDDEC_REVERSEBITS_UINT32(numericSpacePos << GSTDDEC_VECTOR_UINT32(upperPaddingBits));
+
+						GSTDDEC_VECTOR_IF(GSTDDEC_VECTOR_UINT32(writeOffsetStart) + GSTDDEC_LANE_INDEX < GSTDDEC_VECTOR_UINT32(numTableEntries))
+						{
+							StoreHuffmanLookupCodes(GSTDDEC_CALL_EXECUTION_MASK tablePos, GSTDDEC_VECTOR_UINT32(laneSymbol), codeLength);
+						}
+						GSTDDEC_VECTOR_END_IF
+					}
+
+					GSTDDEC_VECTOR_IF(GSTDDEC_VECTOR_UINT32(laneToFlush) == GSTDDEC_LANE_INDEX)
+					{
+						GSTDDEC_CONDITIONAL_STORE(weight, GSTDDEC_VECTOR_UINT32(0));
+						GSTDDEC_CONDITIONAL_STORE(isExpectedWeight, GSTDDEC_VECTOR_BOOL(false));
+					}
+					GSTDDEC_VECTOR_END_IF
+				}
+			}
+			else
+			{
+				// Scatter fill
+				vuint32_t vNumTableEntries = GSTDDEC_VECTOR_UINT32(0);
+
+				GSTDDEC_VECTOR_IF(isExpectedWeight)
+				{
+					GSTDDEC_CONDITIONAL_STORE(vNumTableEntries, GSTDDEC_VECTOR_UINT32(numTableEntries));
+
+					// NOTE: Running sum is active lanes only here but non-active lanes are zero so that's okay
+					vuint32_t tableStart = (GSTDDEC_VECTOR_UINT32(wns) + GSTDDEC_EXCLUSIVE_RUNNING_SUM(vNumTableEntries));
+
+					for (uint32_t insertOffset = 0; insertOffset < numTableEntries; insertOffset++)
+					{
+						vuint32_t numericSpacePos = tableStart + GSTDDEC_VECTOR_UINT32(insertOffset);
+						vuint32_t tablePos = GSTDDEC_REVERSEBITS_UINT32(numericSpacePos << GSTDDEC_VECTOR_UINT32(upperPaddingBits));
+
+						StoreHuffmanLookupCodes(GSTDDEC_CALL_EXECUTION_MASK tablePos, symbol, codeLength);
+					}
+
+					GSTDDEC_CONDITIONAL_STORE(weight, GSTDDEC_VECTOR_UINT32(0));
+				}
+				GSTDDEC_VECTOR_END_IF
+
+				wns = wns + GSTDDEC_SUM(vNumTableEntries);
+			}
+
+			// Update the numeric range end
+			GSTDDEC_UNROLL_HINT
+			for (uint32_t wnsIndex = 0; wnsIndex < GSTDDEC_NUMERIC_STARTS_VVEC_SIZE; wnsIndex++)
+			{
+				if (wnsIndex == expectedWNSIndex)
+				{
+					GSTDDEC_VECTOR_IF(GSTDDEC_LANE_INDEX == GSTDDEC_VECTOR_UINT32(wnsLaneIndex))
+					{
+						GSTDDEC_CONDITIONAL_STORE(weightNumericStarts[wnsIndex], GSTDDEC_VECTOR_UINT32(wns));
+					}
+					GSTDDEC_VECTOR_END_IF
+				}
+			}
+		}
+	}
+
+	// Fill unspecified entries.  This will fill all entries even if the table is unbalanced,
+	// with indeterminate but safe results.
+	{
+		uint32_t unspecifiedWeightMinusOne = unspecifiedWeight - 1;
+		uint32_t unspecifiedWNSIndex = unspecifiedWeightMinusOne / GSTDDEC_VECTOR_WIDTH;
+		uint32_t unspecifiedWNSLaneIndex = unspecifiedWeightMinusOne % GSTDDEC_VECTOR_WIDTH;
+		uint32_t unspecifiedWNS = 0;
+		uint32_t unspecifiedCodeLength = weightBits - unspecifiedWeightMinusOne;
+
+		GSTDDEC_UNROLL_HINT
+		for (uint32_t wnsIndex = 0; wnsIndex < GSTDDEC_NUMERIC_STARTS_VVEC_SIZE; wnsIndex++)
+		{
+			if (wnsIndex == unspecifiedWNSIndex)
+				unspecifiedWNS = GSTDDEC_VECTOR_READ_FROM_INDEX(weightNumericStarts[wnsIndex], unspecifiedWNSLaneIndex);
+		}
+
+		for (uint32_t unspecifiedOffsetStart = 0; unspecifiedOffsetStart < remainingBitSpace; unspecifiedOffsetStart += GSTDDEC_VECTOR_WIDTH)
+		{
+			vuint32_t unspecifiedOffset = GSTDDEC_VECTOR_UINT32(unspecifiedOffsetStart) + GSTDDEC_LANE_INDEX;
+
+			GSTDDEC_VECTOR_IF(unspecifiedOffset < GSTDDEC_VECTOR_UINT32(remainingBitSpace))
+			{
+				vuint32_t numericSpacePos = GSTDDEC_VECTOR_UINT32(unspecifiedWNS) + GSTDDEC_VECTOR_UINT32(unspecifiedOffset);
+				vuint32_t tablePos = GSTDDEC_REVERSEBITS_UINT32(numericSpacePos << GSTDDEC_VECTOR_UINT32(upperPaddingBits));
+
+				StoreHuffmanLookupCodes(GSTDDEC_CALL_EXECUTION_MASK tablePos, GSTDDEC_VECTOR_UINT32(numSpecifiedWeights), unspecifiedCodeLength);
+			}
+			GSTDDEC_VECTOR_END_IF
+		}
+	}
+
 	GSTDDEC_WARN("NOT YET IMPLEMENTED");
 }
 
@@ -305,12 +623,32 @@ uint32_t GSTDDEC_FUNCTION_CONTEXT WaveSum(vuint32_t value)
 }
 
 GSTDDEC_FUNCTION_PREFIX
+uint32_t GSTDDEC_FUNCTION_CONTEXT WaveMax(vuint32_t value)
+{
+	uint32_t result = 0;
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+		result = ArithMax(result, value.Get(i));
+
+	return result;
+}
+
+GSTDDEC_FUNCTION_PREFIX
 bool GSTDDEC_FUNCTION_CONTEXT WaveActiveAnyTrue(vbool_t value)
 {
 	for (unsigned int i = 0; i < TVectorWidth; i++)
 		if (value.Get(i))
 			return true;
 	return false;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+uint32_t GSTDDEC_FUNCTION_CONTEXT WaveActiveCountTrue(vbool_t value)
+{
+	uint32_t numTrue = 0;
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+		if (value.Get(i))
+			numTrue++;
+	return numTrue;
 }
 
 GSTDDEC_FUNCTION_PREFIX
@@ -481,6 +819,29 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT ArithMax(vuint32_t a, vu
 		result.Set(i, ArithMax(a.Get(i), b.Get(i)));
 
 	return result;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT ReverseBits(vuint32_t value)
+{
+	vuint32_t result;
+
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+		result.Set(i, ReverseBits(value.Get(i)));
+
+	return result;
+}
+
+GSTDDEC_FUNCTION_PREFIX
+uint32_t GSTDDEC_FUNCTION_CONTEXT ReverseBits(uint32_t value)
+{
+	value = ((value << 16) & 0xffff0000u) | ((value >> 16) & 0x0000ffffu);
+	value = ((value << 8) & 0xff00ff00u) | ((value >> 8) & 0x00ff00ffu);
+	value = ((value << 4) & 0xf0f0f0f0u) | ((value >> 4) & 0x0f0f0f0fu);
+	value = ((value << 2) & 0xccccccccu) | ((value >> 2) & 0x33333333u);
+	value = ((value << 1) & 0xaaaaaaaau) | ((value >> 1) & 0x55555555u);
+
+	return value;
 }
 
 GSTDDEC_FUNCTION_PREFIX
@@ -972,6 +1333,16 @@ void GSTDDEC_FUNCTION_CONTEXT ConditionalStoreVector(vbool_t executionMask, uint
 }
 
 GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ConditionalStore(vbool_t executionMask, vbool_t &storage, vbool_t value)
+{
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+	{
+		if (executionMask.Get(i))
+			storage.Set(i, value.Get(i));
+	}
+}
+
+GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT ConditionalStore(vbool_t executionMask, vuint32_t &storage, vuint32_t value)
 {
 	for (unsigned int i = 0; i < TVectorWidth; i++)
@@ -1012,7 +1383,6 @@ void GSTDDEC_FUNCTION_CONTEXT ConditionalLoad(vbool_t executionMask, vuint32_t &
 	}
 }
 
-
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT ConditionalOrVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value)
 {
@@ -1020,6 +1390,16 @@ void GSTDDEC_FUNCTION_CONTEXT ConditionalOrVector(vbool_t executionMask, uint32_
 	{
 		if (executionMask.Get(i))
 			storage[index.Get(i)] |= value.Get(i);
+	}
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT ConditionalAddVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value)
+{
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+	{
+		if (executionMask.Get(i))
+			storage[index.Get(i)] += value.Get(i);
 	}
 }
 

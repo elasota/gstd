@@ -100,6 +100,7 @@ namespace gstddec
 		static vuint32_t FastFillAscending(vuint32_t value, uint32_t &runningValue);
 
 		static void ConditionalStoreVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
+		static void ConditionalStore(vbool_t executionMask, vbool_t &storage, vbool_t value);
 		static void ConditionalStore(vbool_t executionMask, vuint32_t &storage, vuint32_t value);
 		static void ConditionalStore(vbool_t executionMask, vuint64_t &storage, vuint64_t value);
 
@@ -107,6 +108,7 @@ namespace gstddec
 		static void ConditionalLoad(vbool_t executionMask, vuint32_t &value, const vuint32_t &storage);
 
 		static void ConditionalOrVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
+		static void ConditionalAddVector(vbool_t executionMask, uint32_t *storage, vuint32_t index, vuint32_t value);
 
 		void DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord);
 		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord);
@@ -115,6 +117,12 @@ namespace gstddec
 		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit);
 		void ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal);
 		void DecodeFSEHuffmanWeights(uint32_t numSpecifiedWeights, uint32_t accuracyLog, uint32_t &huffmanWeightTotal);
+
+		void ResolvePackedAddress4(vuint32_t index, vuint32_t &outDWordIndex, vuint32_t &outBitPos, uint32_t &outMask);
+		void ResolvePackedAddress8(vuint32_t index, vuint32_t &outDWordIndex, vuint32_t &outBitPos, uint32_t &outMask);
+
+		void StoreHuffmanLookupCodes(vbool_t executionMask, vuint32_t tableIndex, vuint32_t symbol, uint32_t length);
+
 		void DecodeLitRLEByte();
 		uint32_t ReadPackedSize();
 
@@ -130,8 +138,10 @@ namespace gstddec
 		uint32_t ReadRawByte();
 
 		static vuint32_t WavePrefixSum(vuint32_t value);
+		static uint32_t WaveMax(vuint32_t value);
 		static uint32_t WaveSum(vuint32_t value);
 		static bool WaveActiveAnyTrue(vbool_t value);
+		static uint32_t WaveActiveCountTrue(vbool_t value);
 		static vuint32_t WavePrefixCountBits(vbool_t value);
 		static uint32_t WaveReadLaneAt(vuint32_t value, uint32_t index);
 		static vuint32_t WaveReadLaneAt(vuint32_t value, vuint32_t index);
@@ -145,6 +155,8 @@ namespace gstddec
 		static vuint32_t ArithMax(vuint32_t a, vuint32_t b);
 		static uint32_t ArithMin(uint32_t a, uint32_t b);
 		static uint32_t ArithMax(uint32_t a, uint32_t b);
+		static vuint32_t ReverseBits(vuint32_t value);
+		static uint32_t ReverseBits(uint32_t value);
 		static vuint32_t LaneIndex();
 
 		const uint32_t *m_inData;
@@ -159,6 +171,14 @@ namespace gstddec
 
 		GroupSharedDecompressorState gs_decompressorState;
 		DecompressorState g_dstate;
+
+		struct HuffmanCodesDebug
+		{
+			uint8_t m_symbol;
+			uint8_t m_length;
+		};
+
+		HuffmanCodesDebug m_huffmanDebug[1 << GSTD_MAX_HUFFMAN_CODE_LENGTH];
 	};
 
 	template<unsigned int TVectorWidth, unsigned int TFormatWidth>

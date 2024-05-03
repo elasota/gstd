@@ -31,15 +31,18 @@ the included LICENSE.txt file.
 #define GSTDDEC_PROMOTE_UINT32_TO_UINT64(n) (vuint64_t(n))
 #define GSTDDEC_DEMOTE_UINT64_TO_UINT32(n) (vuint32_t(n))
 #define GSTDDEC_VECTOR_ANY(n) (WaveActiveAnyTrue(n))
+#define GSTDDEC_VECTOR_ALL(n) (!(WaveActiveAnyTrue(~(n))))
 #define GSTDDEC_VECTOR_TEST_PREV(n) (WavePrefixCountBits(n))
 #define GSTDDEC_VECTOR_FIRST_TRUE_INDEX(n) (FirstTrueIndex(n))
 #define GSTDDEC_VECTOR_LAST_TRUE_INDEX(n) (LastTrueIndex(n))
+#define GSTDDEC_VECTOR_NUM_TRUE(n) (WaveActiveCountTrue(n))
 #define GSTDDEC_VECTOR_READ_FROM_INDEX(n, index) (WaveReadLaneAt((n), (index)))
 
 #define GSTDDEC_WARN(msg) do { if (m_warnCallback != nullptr) m_warnCallback(m_warnContext, (msg));  } while (false)
 
 #define GSTDDEC_PARAM_INOUT(type, name) type &name
 #define GSTDDEC_PARAM_OUT(type, name) type &name
+#define GSTDDEC_PARAM_EXECUTION_MASK vbool_t executionMask,
 
 #define GSTDDEC_VECTOR_IF(condition) do { vbool_t executionMask = (condition);
 #define GSTDDEC_VECTOR_ELSE executionMask = ~executionMask;
@@ -62,6 +65,7 @@ the included LICENSE.txt file.
 #define GSTDDEC_CONDITIONAL_STORE_INDEX(storage, index, value) ConditionalStoreVector(executionMask, (storage), (index), (value))
 
 #define GSTDDEC_CONDITIONAL_OR_INDEX(storage, index, value) ConditionalOrVector(executionMask, (storage), (index), (value))
+#define GSTDDEC_CONDITIONAL_ADD_INDEX(storage, index, value) ConditionalAddVector(executionMask, (storage), (index), (value))
 
 #define GSTDDEC_FLUSH_GS ((void)0)
 
@@ -69,15 +73,16 @@ the included LICENSE.txt file.
 #define GSTDDEC_SUM(value) WaveSum(value)
 #define GSTDDEC_INCLUSIVE_RUNNING_SUM(value) (WavePrefixSum(value) + (value))
 #define GSTDDEC_EXCLUSIVE_RUNNING_SUM(value) (WavePrefixSum(value))
+#define GSTDDEC_VECTOR_MAX(value) (WaveMax(value))
 #define GSTDDEC_MIN(a, b) (ArithMin((a), (b)))
 #define GSTDDEC_MAX(a, b) (ArithMax((a), (b)))
+#define GSTDDEC_REVERSEBITS_UINT32(value) (ReverseBits(value))
 
 #define GSTDDEC_SANITIZE						1
 #define GSTDDEC_SUPPORT_FAST_SEQUENTIAL_FILL	0
 
-#define GSTDDEC_PASS_EXECUTION_MASK executionMask,
-
-#define GSTDDEC_PARAM_EXECUTION_MASK vbool_t executionMask,
+#define GSTDDEC_CALL_EXECUTION_MASK executionMask,
+#define GSTDDEC_CALL_UNIFORM_EXECUTION vbool_t(true),
 
 #define GSTDDEC_LANE_INDEX (LaneIndex())
 

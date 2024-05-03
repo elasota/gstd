@@ -22,6 +22,9 @@
 
 #define GSTDDEC_IS_WIDER_THAN_FORMAT	(GSTDDEC_VECTOR_WIDTH > GSTDDEC_FORMAT_WIDTH)
 
+// This is 1 more packed weight than necessary, but in practice it doesn't matter
+#define GSTDDEC_NUM_PACKED_HUFFMAN_WEIGHT_DWORDS	((GSTD_MAX_HUFFMAN_WEIGHT + 3) / 4)
+#define GSTDDEC_NUM_PACKED_HUFFMAN_DEC_DWORDS ((1 << GSTD_MAX_HUFFMAN_CODE_LENGTH) * 3 / 4)
 
 struct DecompressorState
 {
@@ -41,6 +44,8 @@ struct DecompressorState
 struct GroupSharedDecompressorState
 {
 	uint32_t packedHuffmanWeights[64];	// 4 bits each
+	uint32_t packedHuffmanWeightCounts[GSTDDEC_NUM_PACKED_HUFFMAN_WEIGHT_DWORDS];
+	uint32_t huffmanDecTable[GSTDDEC_NUM_PACKED_HUFFMAN_DEC_DWORDS];
 
 	uint32_t probTemps[1 << GSTDDEC_MAX_ANY_ACCURACY_LOG];
 
