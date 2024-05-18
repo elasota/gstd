@@ -329,6 +329,7 @@ void PrintUsageAndQuit()
 	fprintf(stderr, "    -pagesize <size> - Sets the size of a page (default is 65536 bytes)\n");
 	fprintf(stderr, "    -level <level>   - Sets compression level (default is 9)\n");
 	fprintf(stderr, "    -t <threads>     - Sets maximum thread count\n");
+	fprintf(stderr, "    -isolate <block> - Compresses only a specific block\n");
 	fprintf(stderr, "    -f <path>        - Sets path to output failed blocks to (for debugging)\n");
 	fprintf(stderr, "    -nofseshuffle    - Disables FSE table shuffling\n");
 
@@ -471,7 +472,7 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
@@ -482,6 +483,8 @@ public:
 	unsigned int CompressionLevel() const;
 	uint32_t Tweaks() const;
 	const char* FailBlockPath() const;
+	bool IsIsolateBlock() const;
+	unsigned int IsolateBlock() const;
 
 private:
 	std::mutex m_inFileMutex;
@@ -499,10 +502,15 @@ private:
 	unsigned int m_compressionLevel;
 	uint32_t m_tweaks;
 	const char* m_failBlockPath;
+
+	bool m_isIsolateBlock;
+	unsigned int m_isolateBlock;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char* failBlockPath)
-	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize), m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock)
+	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize)
+	, m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
+	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock)
 {
 }
 
@@ -565,6 +573,16 @@ unsigned int CompressionGlobal::Tweaks() const
 const char* CompressionGlobal::FailBlockPath() const
 {
 	return m_failBlockPath;
+}
+
+bool CompressionGlobal::IsIsolateBlock() const
+{
+	return m_isIsolateBlock;
+}
+
+unsigned int CompressionGlobal::IsolateBlock() const
+{
+	return m_isolateBlock;
 }
 
 class CompressionTask : public ThreadedTaskBase
@@ -660,6 +678,9 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 
 void CompressionTask::RunWorkUnit(size_t workUnit)
 {
+	if (m_cglobal->IsIsolateBlock() && m_cglobal->IsolateBlock() != workUnit)
+		return;
+
 	m_workUnit = workUnit;
 
 	size_t currentPageSize = ComputeCurrentPageSize();
@@ -719,6 +740,9 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 
 void CompressionTask::FinishWritingWorkUnit()
 {
+	if (m_cglobal->IsIsolateBlock() && m_cglobal->IsolateBlock() != m_workUnit)
+		return;
+
 	size_t currentPageSize = ComputeCurrentPageSize();
 	const unsigned char *compressedData = m_transcodedData;
 	size_t compressedSize = m_transcodedSize;
@@ -796,9 +820,11 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 {
 	unsigned int maxThreads = std::thread::hardware_concurrency();
 	unsigned int numThreads = maxThreads;
+	unsigned int isolateBlock = 0;
 	unsigned int pageSize = 64 * 1024;
 	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
 	const char* failBlockPath = "";
+	bool isolateMode = 0;
 	uint32_t tweaks = 0;
 
 	for (int i = 0; i < optc; i++)
@@ -839,6 +865,16 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 			if (i == optc || !sscanf(optv[i], "%u", &compressionLevel))
 			{
 				fprintf(stderr, "Invalid level for -level");
+				return -1;
+			}
+		}
+		else if (!strcmp(optName, "-isolate"))
+		{
+			isolateMode = true;
+			i++;
+			if (i == optc || !sscanf(optv[i], "%u", &isolateBlock))
+			{
+				fprintf(stderr, "Invalid block value for -isolate");
 				return -1;
 			}
 		}
@@ -910,7 +946,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock);
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 
