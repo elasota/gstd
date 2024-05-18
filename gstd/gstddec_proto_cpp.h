@@ -114,8 +114,8 @@ namespace gstddec
 		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord);
 		void DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord);
 		void ClearLitHuffmanTree();
-		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit);
-		void ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal);
+		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit, uint32_t &outWeightTotal);
+		void ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal, uint32_t &outWeightTotal);
 		void DecodeFSEHuffmanWeights(uint32_t numSpecifiedWeights, uint32_t accuracyLog, uint32_t &huffmanWeightTotal);
 
 		void ResolvePackedAddress4(vuint32_t index, vuint32_t &outDWordIndex, vuint32_t &outBitPos, uint32_t &outMask);
@@ -130,7 +130,7 @@ namespace gstddec
 		vuint32_t BitstreamPeek(uint32_t vvecIndex, uint32_t numLanesToLoad, uint32_t numBits);
 		void BitstreamDiscard(uint32_t vvecIndex, uint32_t numLanesToDiscard, vuint32_t numBits);
 
-		void DecodeFSETable(vuint32_t laneIndex, uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog);
+		void DecodeFSETable(uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t accuracyLog, uint32_t maxAccuracyLog);
 
 		// This decodes a number of FSE values, all non-decoded values are filled with zero
 		vuint32_t DecodeFSEValue(uint32_t numLanesToRefill, uint32_t vvecIndex, uint32_t accuracyLog, uint32_t firstCell);
