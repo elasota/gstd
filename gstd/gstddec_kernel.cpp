@@ -29,6 +29,54 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressRLEBlock(vuint32_t laneIndex, uint32_t c
 }
 
 GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
+{
+	vuint32_t litLengthValues[GSTDDEC_VVEC_SIZE];
+	vuint32_t matchLengthValues[GSTDDEC_VVEC_SIZE];
+	vuint32_t offsetValues[GSTDDEC_VVEC_SIZE];
+
+	uint32_t litSectionType = ((controlWord >> GSTD_CONTROL_LIT_SECTION_TYPE_OFFSET) & GSTD_CONTROL_LIT_SECTION_TYPE_MASK);
+	uint32_t litLengthsMode = ((controlWord >> GSTD_CONTROL_LIT_LENGTH_MODE_OFFSET) & GSTD_CONTROL_LIT_LENGTH_MODE_MASK);
+	uint32_t offsetsMode = ((controlWord >> GSTD_CONTROL_OFFSET_MODE_OFFSET) & GSTD_CONTROL_OFFSET_MODE_MASK);
+	uint32_t matchLengthsMode = ((controlWord >> GSTD_CONTROL_MATCH_LENGTH_MODE_OFFSET) & GSTD_CONTROL_MATCH_LENGTH_MODE_MASK);
+
+	uint32_t numSequences = 0;
+	
+	numSequences = ReadPackedSize();
+
+	for (uint32_t i = 0; i < GSTDDEC_VVEC_SIZE; i++)
+	{
+		litLengthValues[i] = GSTDDEC_VECTOR_UINT32(0);
+		matchLengthValues[i] = GSTDDEC_VECTOR_UINT32(0);
+		offsetValues[i] = GSTDDEC_VECTOR_UINT32(0);
+	}
+
+	for (uint32_t firstSequence = 0; firstSequence < numSequences; firstSequence += GSTDDEC_FORMAT_WIDTH)
+	{
+		uint32_t numValuesToRefill = GSTDDEC_MIN(numSequences - firstSequence, GSTDDEC_FORMAT_WIDTH);
+		uint32_t vvecToRefill = (numValuesToRefill + (GSTDDEC_VECTOR_WIDTH - 1)) / GSTDDEC_VECTOR_WIDTH;
+
+		// Help compiler in full SIMD case
+		if (GSTDDEC_VECTOR_WIDTH >= GSTDDEC_FORMAT_WIDTH)
+			vvecToRefill = 1;
+
+		for (uint32_t vvecIndex = 0; vvecIndex < vvecToRefill; vvecIndex++)
+		{
+			uint32_t firstValueOffset = vvecIndex * GSTDDEC_VECTOR_WIDTH;
+			uint32_t lanesToLoad = GSTDDEC_MIN(numValuesToRefill - firstValueOffset, GSTDDEC_VECTOR_WIDTH);
+
+			BitstreamPeekNoTruncate(vvecIndex, lanesToLoad, GSTD_MAX_OFFSET_ACCURACY_LOG + GSTD_MAX_LIT_LENGTH_ACCURACY_LOG + GSTD_MAX_MATCH_LENGTH_ACCURACY_LOG);
+
+			litLengthValues[vvecIndex] = DecodeFSEValueNoPeek(lanesToLoad, vvecIndex, g_dstate.litLengthAccuracyLog, GSTDDEC_FSETAB_LIT_LENGTH_START);
+			matchLengthValues[vvecIndex] = DecodeFSEValueNoPeek(lanesToLoad, vvecIndex, g_dstate.matchLengthAccuracyLog, GSTDDEC_FSETAB_MATCH_LENGTH_START);
+			offsetValues[vvecIndex] = DecodeFSEValueNoPeek(lanesToLoad, vvecIndex, g_dstate.offsetAccuracyLog, GSTDDEC_FSETAB_OFFSET_START);
+		}
+
+		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+	}
+}
+
+GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord)
 {
 	uint32_t litSectionType = ((controlWord >> GSTD_CONTROL_LIT_SECTION_TYPE_OFFSET) & GSTD_CONTROL_LIT_SECTION_TYPE_MASK);
@@ -70,16 +118,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 	GSTDDEC_BRANCH_HINT
 	if (offsetsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
 	{
-		DecodeFSETable(GSTDDEC_FSETAB_OFFSET_START, GSTD_MAX_OFFSET_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_OFFSET_POS) & GSTD_ACCURACY_BYTE_OFFSET_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_OFFSET_ACCURACY_LOG);
-	}
-	else
-	{
-		GSTDDEC_WARN("NOT YET IMPLEMENTED");
-	}
-
-	if (litLengthsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
-	{
-		DecodeFSETable(GSTDDEC_FSETAB_LIT_LENGTH_START, GSTD_MAX_LIT_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_LIT_LENGTH_POS) & GSTD_ACCURACY_BYTE_LIT_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_LIT_LENGTH_ACCURACY_LOG);
+		DecodeFSETable(GSTDDEC_FSETAB_OFFSET_START, GSTD_MAX_OFFSET_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_OFFSET_POS) & GSTD_ACCURACY_BYTE_OFFSET_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_OFFSET_ACCURACY_LOG, g_dstate.offsetAccuracyLog);
 	}
 	else
 	{
@@ -88,27 +127,35 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 
 	if (matchLengthsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
 	{
-		DecodeFSETable(GSTDDEC_FSETAB_MATCH_LENGTH_START, GSTD_MAX_MATCH_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_MATCH_LENGTH_POS) & GSTD_ACCURACY_BYTE_MATCH_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_MATCH_LENGTH_ACCURACY_LOG);
+		DecodeFSETable(GSTDDEC_FSETAB_MATCH_LENGTH_START, GSTD_MAX_MATCH_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_MATCH_LENGTH_POS) & GSTD_ACCURACY_BYTE_MATCH_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_MATCH_LENGTH_ACCURACY_LOG, g_dstate.matchLengthAccuracyLog);
 	}
 	else
 	{
 		GSTDDEC_WARN("NOT YET IMPLEMENTED");
 	}
 
-	numSequences = ReadPackedSize();
+	if (litLengthsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
+	{
+		DecodeFSETable(GSTDDEC_FSETAB_LIT_LENGTH_START, GSTD_MAX_LIT_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_LIT_LENGTH_POS) & GSTD_ACCURACY_BYTE_LIT_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_LIT_LENGTH_ACCURACY_LOG, g_dstate.litLengthAccuracyLog);
+	}
+	else
+	{
+		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+	}
 
-	GSTDDEC_WARN("NOT YET IMPLEMENTED");
+	DecodeAndExecuteSequences(controlWord);
 }
 
 
 GSTDDEC_FUNCTION_PREFIX
-GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeFSEValue(uint32_t numLanesToRefill, uint32_t vvecIndex, uint32_t accuracyLog, uint32_t firstCell)
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeFSEValueNoPeek(uint32_t numLanesToRefill, uint32_t vvecIndex, uint32_t accuracyLog, uint32_t firstCell)
 {
-	vuint32_t bits = BitstreamPeekNoTruncate(vvecIndex, numLanesToRefill, GSTD_MAX_ACCURACY_LOG);
 	vuint32_t state = g_dstate.fseState[vvecIndex];
 
 	uint32_t accuracyLogMask = (1 << accuracyLog) - 1;
 	vuint32_t symbol = GSTDDEC_VECTOR_UINT32(0);
+
+	vuint32_t preDiscardBits = GSTDDEC_DEMOTE_UINT64_TO_UINT32(g_dstate.bitstreamBits[vvecIndex]);
 
 	BitstreamDiscard(vvecIndex, numLanesToRefill, g_dstate.fseDrainLevel[vvecIndex]);
 
@@ -117,7 +164,7 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeFSEValue(uint32_t 
 		vuint32_t numBitsToRefill = g_dstate.fseDrainLevel[vvecIndex];
 		vuint32_t bitsRefillMask = (GSTDDEC_VECTOR_UINT32(1) << numBitsToRefill) - GSTDDEC_VECTOR_UINT32(1);
 
-		vuint32_t refilledState = state + (bits & bitsRefillMask);
+		vuint32_t refilledState = state + (preDiscardBits & bitsRefillMask);
 		vuint32_t fseCellIndex = refilledState & GSTDDEC_VECTOR_UINT32(accuracyLogMask);
 
 		vuint32_t fseCellData = GSTDDEC_VECTOR_UINT32(0);
@@ -138,6 +185,14 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeFSEValue(uint32_t 
 	GSTDDEC_VECTOR_END_IF
 
 	return symbol;
+}
+
+
+GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeFSEValue(uint32_t numLanesToRefill, uint32_t vvecIndex, uint32_t accuracyLog, uint32_t firstCell)
+{
+	BitstreamPeekNoTruncate(vvecIndex, numLanesToRefill, GSTD_MAX_ACCURACY_LOG);
+	return DecodeFSEValueNoPeek(numLanesToRefill, vvecIndex, accuracyLog, firstCell);
 }
 
 GSTDDEC_FUNCTION_PREFIX
@@ -613,11 +668,12 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 	else
 	{
 		uint32_t accuracyLog = auxBit + 5;
+		uint32_t sanitizedAccuracyLog = 0;
 
-		DecodeFSETable(GSTDDEC_FSETAB_HUFF_WEIGHT_START, GSTD_MAX_HUFFMAN_WEIGHT, accuracyLog, GSTD_MAX_HUFFMAN_WEIGHT_ACCURACY_LOG);
+		DecodeFSETable(GSTDDEC_FSETAB_HUFF_WEIGHT_START, GSTD_MAX_HUFFMAN_WEIGHT, accuracyLog, GSTD_MAX_HUFFMAN_WEIGHT_ACCURACY_LOG, sanitizedAccuracyLog);
 
 		// Decode the actual weights
-		DecodeFSEHuffmanWeights(numSpecifiedWeights, accuracyLog, weightTotal);
+		DecodeFSEHuffmanWeights(numSpecifiedWeights, sanitizedAccuracyLog, weightTotal);
 	}
 
 	ExpandLitHuffmanTable(numSpecifiedWeights, weightTotal, outWeightTotal);
@@ -1005,7 +1061,7 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT BitstreamPeekNoTruncate(
 	}
 	GSTDDEC_VECTOR_END_IF
 
-		uint32_t loadSum = GSTDDEC_SUM(reloadIterator);
+	uint32_t loadSum = GSTDDEC_SUM(reloadIterator);
 
 	g_dstate.readPos += loadSum;
 	return GSTDDEC_DEMOTE_UINT64_TO_UINT32(g_dstate.bitstreamBits[vvecIndex]) & GSTDDEC_VECTOR_UINT32((1 << numBits) - 1);
@@ -1018,7 +1074,7 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT BitstreamPeek(uint32_t v
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t unsanitizedAccuracyLog, uint32_t maxAccuracyLog)
+void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(uint32_t fseTabStart, uint32_t fseTabMaxSymInclusive, uint32_t unsanitizedAccuracyLog, uint32_t maxAccuracyLog, GSTDDEC_PARAM_OUT(uint32_t, outAccuracyLog))
 {
 #if GSTDDEC_SANITIZE
 	uint32_t accuracyLog = GSTDDEC_MIN(unsanitizedAccuracyLog, maxAccuracyLog);
@@ -1039,6 +1095,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(uint32_t fseTabStart, uint32_t fseT
 		GSTDDEC_WARN("Accuracy log was invalid");
 	}
 #endif
+
+	outAccuracyLog = accuracyLog;
 
 	for (uint32_t firstInitLane = 0; firstInitLane < targetProbLimit; firstInitLane += GSTDDEC_VECTOR_WIDTH)
 	{
@@ -1258,6 +1316,9 @@ void GSTDDEC_FUNCTION_CONTEXT Run(vuint32_t laneIndex)
 	g_dstate.uncompressedBytesAvailable = 0;
 	g_dstate.uncompressedBytes = 0;
 	g_dstate.litRLEByte = 0;
+	g_dstate.litLengthAccuracyLog = 0;
+	g_dstate.matchLengthAccuracyLog = 0;
+	g_dstate.offsetAccuracyLog = 0;
 
 	for (uint32_t i = 0; i < GSTDDEC_VVEC_SIZE; i++)
 	{

@@ -31,6 +31,9 @@ struct DecompressorState
 	uint32_t readPos;
 	uint32_t uncompressedBytes;
 	uint32_t uncompressedBytesAvailable;
+	uint32_t litLengthAccuracyLog;
+	uint32_t matchLengthAccuracyLog;
+	uint32_t offsetAccuracyLog;
 
 	vuint64_t bitstreamBits[GSTDDEC_VVEC_SIZE];
 	vuint32_t bitstreamAvailable[GSTDDEC_VVEC_SIZE];
