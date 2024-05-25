@@ -95,6 +95,8 @@ namespace gstddec
 		vuint32_t ReadInputDWord(vbool_t executionMask, vuint32_t dwordPos) const;
 		vuint32_t ReadInputDWord(const vuint32_t &dwordPos) const;
 		uint32_t ReadInputDWord(uint32_t dwordPos) const;
+		uint32_t ReadOutputDWord(uint32_t dwordPos) const;
+		vuint32_t ReadOutputDWord(vbool_t executionMask, vuint32_t dwordPos) const;
 		void PutOutputDWord(const vuint32_t &dwordPos, const vuint32_t &dword) const;
 		void PutOutputDWord(uint32_t dwordPos, uint32_t dword) const;
 		void InterlockedOrOutputDWord(vbool_t executionMask, const vuint32_t &dwordPos, const vuint32_t &dword) const;
@@ -372,7 +374,7 @@ namespace gstddec
 		VectorUInt<TNumber, TWidth> result;
 
 		for (unsigned int i = 0; i < TWidth; i++)
-			result.m_values[i] = m_values[i] & other;
+			result.m_values[i] = m_values[i] % other;
 
 		return result;
 	}

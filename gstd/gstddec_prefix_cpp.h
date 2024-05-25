@@ -24,6 +24,7 @@ the included LICENSE.txt file.
 
 #define GSTDDEC_READ_INPUT_DWORD(pos) (this->ReadInputDWord(pos))
 #define GSTDDEC_CONDITIONAL_READ_INPUT_DWORD(pos) (this->ReadInputDWord(executionMask, pos))
+#define GSTDDEC_CONDITIONAL_READ_OUTPUT_DWORD(pos) (this->ReadOutputDWord(executionMask, pos))
 
 #define GSTDDEC_VECTOR_UINT32(fillValue) (vuint32_t(fillValue))
 #define GSTDDEC_VECTOR_UINT64(fillValue) (vuint64_t(fillValue))

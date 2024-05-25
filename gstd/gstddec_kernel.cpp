@@ -242,7 +242,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExecuteMatchCopy(uint32_t matchLength, uint32_t ma
 	{
 		vuint32_t offsetFromStart = GSTDDEC_VECTOR_UINT32(readOffset) + GSTDDEC_LANE_INDEX;
 
-		vuint32_t readBytePos = (GSTDDEC_VECTOR_UINT32(copySourceBaseAddress) + offsetFromStart) % matchOffset;
+		vuint32_t readBytePos = GSTDDEC_VECTOR_UINT32(copySourceBaseAddress) + (offsetFromStart % matchOffset);
 
 		vuint32_t byteReadDWordIndex = GSTDDEC_VECTOR_UINT32(0);
 		vuint32_t byteReadBitPos = GSTDDEC_VECTOR_UINT32(0);
@@ -258,7 +258,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExecuteMatchCopy(uint32_t matchLength, uint32_t ma
 
 		GSTDDEC_VECTOR_IF(offsetFromStart < GSTDDEC_VECTOR_UINT32(matchLength))
 		{
-			vuint32_t inputByte = (GSTDDEC_CONDITIONAL_READ_INPUT_DWORD(byteReadDWordIndex) >> byteReadBitPos) & GSTDDEC_VECTOR_UINT32(byteReadMask);
+			vuint32_t inputByte = (GSTDDEC_CONDITIONAL_READ_OUTPUT_DWORD(byteReadDWordIndex) >> byteReadBitPos) & GSTDDEC_VECTOR_UINT32(byteReadMask);
 			vuint32_t outputDWord = (inputByte & GSTDDEC_VECTOR_UINT32(byteWriteMask)) << byteWriteBitPos;
 
 			InterlockedOrOutputDWord(GSTDDEC_CALL_EXECUTION_MASK byteWriteDWordIndex, outputDWord);
@@ -1807,6 +1807,29 @@ uint32_t GSTDDEC_FUNCTION_CONTEXT ReadInputDWord(uint32_t dwordPos) const
 	if (dwordPos >= m_inSize)
 		return 0;
 	return m_inData[dwordPos];
+}
+
+GSTDDEC_FUNCTION_PREFIX
+uint32_t GSTDDEC_FUNCTION_CONTEXT ReadOutputDWord(uint32_t dwordPos) const
+{
+	if (dwordPos >= m_outSize)
+		return 0;
+	return m_outData[dwordPos];
+}
+
+GSTDDEC_FUNCTION_PREFIX
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT ReadOutputDWord(vbool_t executionMask, vuint32_t dwordPos) const
+{
+	vuint32_t result;
+	for (unsigned int i = 0; i < TVectorWidth; i++)
+	{
+		if (executionMask.Get(i))
+			result.Set(i, ReadOutputDWord(dwordPos.Get(i)));
+		else
+			result.Set(i, 0xcccccccc);
+	}
+
+	return result;
 }
 
 GSTDDEC_FUNCTION_PREFIX
