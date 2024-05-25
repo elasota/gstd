@@ -36,6 +36,7 @@ the included LICENSE.txt file.
 #define GSTDDEC_VECTOR_FIRST_TRUE_INDEX(n) (FirstTrueIndex(n))
 #define GSTDDEC_VECTOR_LAST_TRUE_INDEX(n) (LastTrueIndex(n))
 #define GSTDDEC_VECTOR_NUM_TRUE(n) (WaveActiveCountTrue(n))
+#define GSTDDEC_VECTOR_CONDITIONAL_READ_FROM_INDEX(n, index) (WaveReadLaneAtConditional(executionMask, (n), (index)))
 #define GSTDDEC_VECTOR_READ_FROM_INDEX(n, index) (WaveReadLaneAt((n), (index)))
 
 #define GSTDDEC_WARN(msg) do { if (m_warnCallback != nullptr) m_warnCallback(m_warnContext, (msg));  } while (false)
@@ -53,6 +54,7 @@ the included LICENSE.txt file.
 
 
 #define GSTDDEC_VECTOR_IF_NESTED(condition) do { vbool_t outerExecutionMask = executionMask; { vbool_t executionMask = outerExecutionMask & (condition);
+#define GSTDDEC_VECTOR_ELSE_NESTED executionMask = ((~executionMask) & outerExecutionMask);
 #define GSTDDEC_VECTOR_END_IF_NESTED } } while(false);
 
 #define GSTDDEC_BRANCH_HINT
@@ -68,6 +70,7 @@ the included LICENSE.txt file.
 #define GSTDDEC_CONDITIONAL_ADD_INDEX(storage, index, value) ConditionalAddVector(executionMask, (storage), (index), (value))
 
 #define GSTDDEC_FLUSH_GS ((void)0)
+#define GSTDDEC_FLUSH_OUTPUT ((void)0)
 
 #define GSTDDEC_NEXT_LOG2_POWER(value) FirstBitHighPlusOne(value)
 #define GSTDDEC_SUM(value) WaveSum(value)

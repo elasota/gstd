@@ -32,6 +32,7 @@ namespace gstddec
 		VectorUInt operator|(const VectorUInt &other) const;
 		VectorUInt operator&(const VectorUInt &other) const;
 		VectorUInt operator^(const VectorUInt &other) const;
+		VectorUInt operator%(uint32_t other) const;
 
 		VectorBool<TWidth> operator<(const VectorUInt &other) const;
 		VectorBool<TWidth> operator<=(const VectorUInt &other) const;
@@ -96,6 +97,7 @@ namespace gstddec
 		uint32_t ReadInputDWord(uint32_t dwordPos) const;
 		void PutOutputDWord(const vuint32_t &dwordPos, const vuint32_t &dword) const;
 		void PutOutputDWord(uint32_t dwordPos, uint32_t dword) const;
+		void InterlockedOrOutputDWord(vbool_t executionMask, const vuint32_t &dwordPos, const vuint32_t &dword) const;
 
 		static vuint32_t FastFillAscending(vuint32_t value, uint32_t &runningValue);
 
@@ -113,6 +115,14 @@ namespace gstddec
 		void DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord);
 		void DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord);
 		void DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord);
+
+		vuint32_t DecodeLiteralVector(uint32_t numLanes, vuint32_t codeBits, vuint32_t &inOutDiscardBits);
+		void RefillLiteralsPartial(uint32_t literalsToRefill, uint32_t passIndex);
+		void RefillLiterals();
+		void EmitLiterals(uint32_t literalsToEmit);
+
+		void DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted);
+		void ExecuteMatchCopy(uint32_t matchLength, uint32_t matchOffset);
 		void DecodeAndExecuteSequences(uint32_t controlWord);
 		void ClearLitHuffmanTree();
 		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit, uint32_t &outWeightTotal);
@@ -122,6 +132,7 @@ namespace gstddec
 		void ResolvePackedAddress4(vuint32_t index, vuint32_t &outDWordIndex, vuint32_t &outBitPos, uint32_t &outMask);
 		void ResolvePackedAddress8(vuint32_t index, vuint32_t &outDWordIndex, vuint32_t &outBitPos, uint32_t &outMask);
 
+		void HuffmanTableIndexToDecodeTableCell(vuint32_t tableIndex, vuint32_t &lengthDWordIndex, vuint32_t &lengthBitPos, vuint32_t &symbolDWordIndex, vuint32_t &symbolBitPos);
 		void StoreHuffmanLookupCodes(vbool_t executionMask, vuint32_t tableIndex, vuint32_t symbol, uint32_t length);
 
 		void DecodeLitRLEByte();
@@ -149,6 +160,7 @@ namespace gstddec
 		static vuint32_t WavePrefixCountBits(vbool_t value);
 		static uint32_t WaveReadLaneAt(vuint32_t value, uint32_t index);
 		static vuint32_t WaveReadLaneAt(vuint32_t value, vuint32_t index);
+		static vuint32_t WaveReadLaneAtConditional(vbool_t executionMask, vuint32_t value, vuint32_t index);
 		static uint32_t FirstTrueIndex(vbool_t value);
 		static uint32_t LastTrueIndex(vbool_t value);
 		static vuint32_t FirstBitHighPlusOne(vuint32_t value);
@@ -350,6 +362,17 @@ namespace gstddec
 
 		for (unsigned int i = 0; i < TWidth; i++)
 			result.m_values[i] = m_values[i] & other.m_values[i];
+
+		return result;
+	}
+
+	template<class TNumber, unsigned int TWidth>
+	VectorUInt<TNumber, TWidth> VectorUInt<TNumber, TWidth>::operator%(uint32_t other) const
+	{
+		VectorUInt<TNumber, TWidth> result;
+
+		for (unsigned int i = 0; i < TWidth; i++)
+			result.m_values[i] = m_values[i] & other;
 
 		return result;
 	}

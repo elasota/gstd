@@ -29,6 +29,7 @@
 struct DecompressorState
 {
 	uint32_t readPos;
+	uint32_t writePosByte;
 	uint32_t uncompressedBytes;
 	uint32_t uncompressedBytesAvailable;
 	uint32_t litLengthAccuracyLog;
@@ -41,7 +42,15 @@ struct DecompressorState
 	vuint32_t fseState[GSTDDEC_VVEC_SIZE];
 	vuint32_t fseDrainLevel[GSTDDEC_VVEC_SIZE];
 
+	uint32_t repeatedOffset1;
+	uint32_t repeatedOffset2;
+	uint32_t repeatedOffset3;
+
 	uint32_t litRLEByte;
+
+	vuint32_t literalsBuffer[GSTDDEC_VVEC_SIZE];
+	uint32_t numLiteralsEmitted;
+	uint32_t maxLiterals;
 };
 
 struct GroupSharedDecompressorState
