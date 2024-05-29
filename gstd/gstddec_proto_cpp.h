@@ -77,11 +77,11 @@ namespace gstddec
 		typedef VectorUInt<uint16_t, TVectorWidth> vuint16_t;
 		typedef VectorBool<TVectorWidth> vbool_t;
 		typedef void (*WarnCallback_t)(void *, const char *);
+		typedef void (*DiagCallback_t)(void *, const char *, ...);
 
 #include "gstddec_decompressor_state.h"
 
-		DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize, void *warnContext, WarnCallback_t warnCallback);
-
+		DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize, void *warnContext, WarnCallback_t warnCallback, void *diagContext, DiagCallback_t diagCallback);
 
 		void Run(vuint32_t laneIndex);
 
@@ -187,6 +187,9 @@ namespace gstddec
 		void *m_warnContext;
 		WarnCallback_t m_warnCallback;
 
+		void *m_diagContext;
+		DiagCallback_t m_diagCallback;
+
 		GroupSharedDecompressorState gs_decompressorState;
 		DecompressorState g_dstate;
 
@@ -200,8 +203,8 @@ namespace gstddec
 	};
 
 	template<unsigned int TVectorWidth, unsigned int TFormatWidth>
-	DecompressorContext<TVectorWidth, TFormatWidth>::DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize, void *warnContext, WarnCallback_t warnCallback)
-		: m_inData(inData), m_inSize(inSize / 4), m_outData(outData), m_outSize(outSize / 4), m_warnContext(warnContext), m_warnCallback(warnCallback)
+	DecompressorContext<TVectorWidth, TFormatWidth>::DecompressorContext(const uint32_t *inData, uint32_t inSize, uint32_t *outData, uint32_t outSize, void *warnContext, WarnCallback_t warnCallback, void *diagContext, DiagCallback_t diagCallback)
+		: m_inData(inData), m_inSize(inSize / 4), m_outData(outData), m_outSize(outSize / 4), m_warnContext(warnContext), m_warnCallback(warnCallback), m_diagContext(diagContext), m_diagCallback(diagCallback)
 	{
 		m_constants.InSizeDWords = m_inSize;
 		m_constants.OutSizeDWords = m_outSize;

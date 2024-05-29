@@ -10,6 +10,8 @@ the included LICENSE.txt file.
 
 #include "gstddec_prefix_cpp.h"
 
+#include <stdio.h>
+
 
 //GSTDDEC_MAIN_FUNCTION_DEF(vuint32_t laneIndex)
 
@@ -233,7 +235,6 @@ void GSTDDEC_FUNCTION_CONTEXT ExecuteMatchCopy(uint32_t matchLength, uint32_t ma
 
 	if (matchOffset == 0)
 		return;
-
 #endif
 
 	uint32_t copySourceBaseAddress = g_dstate.writePosByte - matchOffset;
@@ -294,6 +295,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 		offsetValues[i] = GSTDDEC_VECTOR_UINT32(0);
 	}
 
+	int prevSequenceNumber = 0;
+
 	for (uint32_t firstSequence = 0; firstSequence < numSequences; firstSequence += GSTDDEC_FORMAT_WIDTH)
 	{
 		uint32_t numValuesToRefill = GSTDDEC_MIN(numSequences - firstSequence, GSTDDEC_FORMAT_WIDTH);
@@ -351,7 +354,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 				}
 				GSTDDEC_VECTOR_ELSE_NESTED
 				{
-					GSTDDEC_CONDITIONAL_STORE(matchLengthBits, matchLengthCode - GSTDDEC_VECTOR_UINT32(19));
+					GSTDDEC_CONDITIONAL_STORE(matchLengthBits, matchLengthCode - GSTDDEC_VECTOR_UINT32(36));
 					GSTDDEC_CONDITIONAL_STORE(matchLengthBaseMinus3, GSTDDEC_VECTOR_UINT32(1) << matchLengthBits);
 				}
 				GSTDDEC_VECTOR_END_IF_NESTED
@@ -387,6 +390,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 
 			for (uint32_t seqLaneIndex = 0; seqLaneIndex < numSequencesToExecute; seqLaneIndex++)
 			{
+				int sequenceNumber = prevSequenceNumber++;
+
 				uint32_t litLengthValue = GSTDDEC_VECTOR_READ_FROM_INDEX(litLengthValues[vvecIndex], seqLaneIndex);
 				uint32_t matchLength = GSTDDEC_VECTOR_READ_FROM_INDEX(matchLengthValues[vvecIndex], seqLaneIndex);
 				uint32_t offsetValue = GSTDDEC_VECTOR_READ_FROM_INDEX(offsetValues[vvecIndex], seqLaneIndex);
@@ -394,15 +399,16 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 				uint32_t realOffset = 0;
 				if (offsetValue <= 3)
 				{
+					uint32_t offsetBehavior = offsetValue;
 					if (litLengthValue != 0)
-						offsetValue--;
+						offsetBehavior--;
 
-					if (offsetValue == 0)
+					if (offsetBehavior == 0)
 					{
 						// RepeatedOffset1
 						realOffset = g_dstate.repeatedOffset1;
 					}
-					else if (offsetValue == 1)
+					else if (offsetBehavior == 1)
 					{
 						// RepeatedOffset2
 						realOffset = g_dstate.repeatedOffset2;
@@ -412,7 +418,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 					else
 					{
 						// RepeatedOffset3 or RepeatedOffset1 - 1
-						if (offsetValue == 2)
+						if (offsetBehavior == 2)
 							realOffset = g_dstate.repeatedOffset3;
 						else
 						{
@@ -433,8 +439,16 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 					}
 				}
 				else
+				{
 					realOffset = offsetValue - 3;
+					g_dstate.repeatedOffset3 = g_dstate.repeatedOffset2;
+					g_dstate.repeatedOffset2 = g_dstate.repeatedOffset1;
+					g_dstate.repeatedOffset1 = realOffset;
+				}
 
+				GSTDDEC_DIAGNOSTIC("Sequence %i: Lit length %u  Match length %u  Offset code %u\n", sequenceNumber, litLengthValue, matchLength, offsetValue);
+
+				GSTDDEC_BRANCH_HINT
 				if (litLengthValue > 0)
 					DecodeLiteralsToTarget(g_dstate.numLiteralsEmitted + litLengthValue);
 
@@ -514,14 +528,15 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 	DecodeAndExecuteSequences(controlWord);
 
 	// Flush trailing literals
-	if (g_dstate.numLiteralsEmitted != g_dstate.maxLiterals)
+	GSTDDEC_BRANCH_HINT
+	if (g_dstate.numLiteralsEmitted < g_dstate.maxLiterals)
+		DecodeLiteralsToTarget(g_dstate.maxLiterals);
+	else
 	{
-		if (g_dstate.numLiteralsEmitted > g_dstate.maxLiterals)
+		if (g_dstate.numLiteralsEmitted < g_dstate.maxLiterals)
 		{
 			GSTDDEC_WARN("Too many literals emitted");
 		}
-
-		DecodeLiteralsToTarget(g_dstate.maxLiterals);
 	}
 }
 
@@ -1760,6 +1775,7 @@ void GSTDDEC_FUNCTION_CONTEXT Run(vuint32_t laneIndex)
 		}
 		else if (blockType == GSTD_BLOCK_TYPE_RAW)
 		{
+			//DecompressRawBlock(decompressedSize);
 			GSTDDEC_WARN("NOT YET IMPLEMENTED");
 		}
 		else
@@ -1973,12 +1989,12 @@ void GSTDDEC_FUNCTION_CONTEXT ConditionalAddVector(vbool_t executionMask, uint32
 	}
 }
 
-void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity, void *warnContext, void (*warnCallback)(void *, const char *))
+void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity, void *warnContext, void (*warnCallback)(void *, const char *), void *diagContext, void (*diagCallback)(void *, const char *, ...))
 {
 	const unsigned int laneCount = 32;
 	const unsigned int formatLaneCount = 32;
 
-	gstddec::DecompressorContext<laneCount, formatLaneCount> decompressor(static_cast<const uint32_t*>(inData), inSize, static_cast<uint32_t*>(outData), outCapacity, warnContext, warnCallback);
+	gstddec::DecompressorContext<laneCount, formatLaneCount> decompressor(static_cast<const uint32_t*>(inData), inSize, static_cast<uint32_t*>(outData), outCapacity, warnContext, warnCallback, diagContext, diagCallback);
 
 	gstddec::VectorUInt<uint32_t, laneCount> laneIndexes;
 	for (unsigned int i = 0; i < laneCount; i++)

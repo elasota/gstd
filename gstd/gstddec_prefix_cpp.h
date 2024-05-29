@@ -11,7 +11,6 @@ the included LICENSE.txt file.
 #define GSTDDEC_FORMAT_WIDTH		TFormatWidth
 #define GSTDDEC_VECTOR_WIDTH		TVectorWidth
 
-
 #include "gstddec_proto_cpp.h"
 
 
@@ -41,6 +40,7 @@ the included LICENSE.txt file.
 #define GSTDDEC_VECTOR_READ_FROM_INDEX(n, index) (WaveReadLaneAt((n), (index)))
 
 #define GSTDDEC_WARN(msg) do { if (m_warnCallback != nullptr) m_warnCallback(m_warnContext, (msg));  } while (false)
+#define GSTDDEC_DIAGNOSTIC(fmt, ...) do { if (m_diagCallback != nullptr) m_diagCallback(m_diagContext, (fmt), __VA_ARGS__);  } while (false)
 
 #define GSTDDEC_PARAM_INOUT(type, name) type &name
 #define GSTDDEC_PARAM_OUT(type, name) type &name

@@ -20,11 +20,13 @@ the included LICENSE.txt file.
 #include <vector>
 #include <limits>
 
+#include <stdarg.h>
+
 struct ThreadedTaskWorkerState;
 struct SerializedTaskGlobalState;
 struct SerializedTaskWorkerState;
 
-extern void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity, void *warnContext, void (*warnCallback)(void *, const char *));
+extern void DecompressGstdCPU32(const void *inData, uint32_t inSize, void *outData, uint32_t outCapacity, void *warnContext, void (*warnCallback)(void *, const char *), void *diagContext, void (*diagCallback)(void *, const char *, ...));
 extern "C" uint32_t crc32(uint32_t crc, const void *buf, size_t len);
 
 class AutoResetEvent
@@ -87,9 +89,9 @@ void AutoResetEvent::WaitFor()
 	{
 		while (!m_signalled)
 			m_cv.wait(lock);
-
-		m_signalled = false;
 	}
+
+	m_signalled = false;
 }
 
 void AutoResetEvent::Signal()
@@ -246,6 +248,8 @@ void SerializedTaskGlobalState::RunThread(size_t workerIndex)
 			bucket.m_workerAssignedToTask = workerState;
 		}
 
+		workerState->m_workUnitIndex = thisWorkUnit;
+
 		workerState->m_taskRunner->RunWorkUnit(thisWorkUnit);
 
 		bool shouldWaitForCompletionKick = false;
@@ -274,7 +278,7 @@ void SerializedTaskGlobalState::RunThread(size_t workerIndex)
 			for (size_t i = 0; i < numRemainingTasks; i++)
 				m_taskQueue[i] = m_taskQueue[i + 1];
 
-			if (m_taskQueue[0].m_isFinished)
+			if (numRemainingTasks > 0 && m_taskQueue[0].m_isFinished)
 				m_taskQueue[0].m_workerAssignedToTask->m_finalizeEvent.Signal();
 		}
 
@@ -341,8 +345,57 @@ void DecompressWarn(void *context, const char *str)
 	fprintf(stderr, "Decompressor threw warning for block %i: %s\n", *static_cast<int*>(context), str);
 }
 
+void DecompressDiag(void *context, const char *fmt, ...)
+{
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(static_cast<FILE *>(context), fmt, args);
+
+	vfprintf(stdout, fmt, args);
+	va_end(args);
+
+	fflush(static_cast<FILE *>(context));
+}
+
 int DecompressMain(int optc, const char **optv, const char *inFileName, const char *outFileName)
 {
+	FILE *diagF = nullptr;
+	bool writeDamaged = false;
+
+	for (int i = 0; i < optc; i++)
+	{
+		const char *optName = optv[i];
+		if (!strcmp(optName, "-diag"))
+		{
+			i++;
+			if (i == optc)
+			{
+				fprintf(stderr, "Missing file naem for -diag");
+				return -1;
+			}
+
+			if (diagF)
+			{
+				fprintf(stderr, "Diagnostic file was already specified");
+				return -1;
+			}
+
+			diagF = fopen(optv[i], "wb");
+			if (!diagF)
+			{
+				fprintf(stderr, "Failed to open diagnostic file");
+				return -1;
+			}
+		}
+		else if (!strcmp(optName, "-dmg"))
+			writeDamaged = true;
+		else
+		{
+			fprintf(stderr, "Invalid option %s", optName);
+			return -1;
+		}
+	}
+
 	FILE *inF = fopen(inFileName, "rb");
 	if (!inF)
 	{
@@ -448,12 +501,19 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 			std::vector<uint8_t> decompressedPage;
 			decompressedPage.resize(uncompressedSize + 3);
 
-			DecompressGstdCPU32(&compressedPage[0], blockSize, &decompressedPage[0], uncompressedSize, &blockIndex, DecompressWarn);
+			DecompressGstdCPU32(&compressedPage[0], blockSize, &decompressedPage[0], uncompressedSize, &blockIndex, DecompressWarn, diagF, diagF ? DecompressDiag : nullptr);
 
 			uint32_t actualCRC = crc32(0, &decompressedPage[0], uncompressedSize);
 			if (actualCRC != expectedCRC)
 			{
 				fprintf(stderr, "Error in block %i: Expected CRC %x but CRC was %x", blockIndex, expectedCRC, actualCRC);
+
+				if (writeDamaged)
+					fwrite(&decompressedPage[0], 1, uncompressedSize, outF);
+
+				fclose(inF);
+				fclose(outF);
+
 				return -1;
 			}
 
@@ -466,7 +526,10 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 	fclose(inF);
 	fclose(outF);
 
-	return -1;
+	if (diagF)
+		fclose(diagF);
+
+	return 0;
 }
 
 class CompressionGlobal
@@ -678,10 +741,10 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 
 void CompressionTask::RunWorkUnit(size_t workUnit)
 {
+	m_workUnit = workUnit;
+
 	if (m_cglobal->IsIsolateBlock() && m_cglobal->IsolateBlock() != workUnit)
 		return;
-
-	m_workUnit = workUnit;
 
 	size_t currentPageSize = ComputeCurrentPageSize();
 
