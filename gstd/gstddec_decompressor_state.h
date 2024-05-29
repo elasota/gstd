@@ -50,6 +50,7 @@ struct DecompressorState
 
 	vuint32_t literalsBuffer[GSTDDEC_VVEC_SIZE];
 	uint32_t numLiteralsEmitted;
+	uint32_t huffmanCodeMask;
 	uint32_t maxLiterals;
 };
 

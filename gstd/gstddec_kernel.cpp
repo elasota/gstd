@@ -34,7 +34,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressRLEBlock(vuint32_t laneIndex, uint32_t c
 GSTDDEC_FUNCTION_PREFIX
 GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeLiteralVector(uint32_t numLanes, vuint32_t codeBits, GSTDDEC_PARAM_INOUT(vuint32_t, inOutDiscardBits))
 {
-	uint32_t huffmanCodeMask = (1 << GSTD_MAX_HUFFMAN_CODE_LENGTH) - 1;
+	uint32_t huffmanCodeMask = g_dstate.huffmanCodeMask;
 	vuint32_t tableIndex = ((codeBits >> inOutDiscardBits) & GSTDDEC_VECTOR_UINT32(huffmanCodeMask));
 
 	vuint32_t symbolDWordIndex = GSTDDEC_VECTOR_UINT32(0);
@@ -488,6 +488,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 		}
 
 		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+
+		finalWeightTotal = 256;
 	}
 
 	GSTDDEC_BRANCH_HINT
@@ -525,6 +527,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 		GSTDDEC_WARN("NOT YET IMPLEMENTED");
 	}
 
+	g_dstate.huffmanCodeMask = finalWeightTotal - 1;
+
 	DecodeAndExecuteSequences(controlWord);
 
 	// Flush trailing literals
@@ -533,7 +537,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 		DecodeLiteralsToTarget(g_dstate.maxLiterals);
 	else
 	{
-		if (g_dstate.numLiteralsEmitted < g_dstate.maxLiterals)
+		if (g_dstate.numLiteralsEmitted > g_dstate.maxLiterals)
 		{
 			GSTDDEC_WARN("Too many literals emitted");
 		}
@@ -729,7 +733,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExpandLitHuffmanTable(uint32_t numSpecifiedWeights
 {
 	uint32_t weightBits = GSTDDEC_NEXT_LOG2_POWER(weightTotal);
 
-	// TODO: Check for weightTotal == 0
+	// FIXME CRITICAL: Check for weightTotal == 0
 #if GSTDDEC_SANITIZE
 	if (weightBits > GSTD_MAX_HUFFMAN_CODE_LENGTH)
 	{
@@ -1744,6 +1748,7 @@ void GSTDDEC_FUNCTION_CONTEXT Run(vuint32_t laneIndex)
 	g_dstate.repeatedOffset3 = 8;
 	g_dstate.numLiteralsEmitted = 0;
 	g_dstate.maxLiterals = 0;
+	g_dstate.huffmanCodeMask = 0;
 
 	for (uint32_t i = 0; i < GSTDDEC_VVEC_SIZE; i++)
 	{
