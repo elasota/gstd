@@ -11,7 +11,7 @@ the included LICENSE.txt file.
 #include "gstddec_prefix_cpp.h"
 
 #include "gstddec_public_constants.h"
-
+#include "gstddec_fsetab_predefined.h"
 
 //GSTDDEC_MAIN_FUNCTION_DEF(vuint32_t laneIndex)
 
@@ -32,9 +32,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressRLEBlock(vuint32_t laneIndex, uint32_t c
 }
 
 GSTDDEC_FUNCTION_PREFIX
-GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeLiteralVector(uint32_t numLanes, vuint32_t codeBits, GSTDDEC_PARAM_INOUT(vuint32_t, inOutDiscardBits))
+GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeLiteralVector(uint32_t numLanes, vuint32_t codeBits, uint32_t huffmanCodeMask, GSTDDEC_PARAM_INOUT(vuint32_t, inOutDiscardBits))
 {
-	uint32_t huffmanCodeMask = g_dstate.huffmanCodeMask;
 	vuint32_t tableIndex = ((codeBits >> inOutDiscardBits) & GSTDDEC_VECTOR_UINT32(huffmanCodeMask));
 
 	vuint32_t symbolDWordIndex = GSTDDEC_VECTOR_UINT32(0);
@@ -65,7 +64,7 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeLiteralVector(uint
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, uint32_t passIndex)
+void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, uint32_t huffmanCodeMask, uint32_t passIndex)
 {
 	// This function refills 0-2 literals into each lane
 	uint32_t refillNudge = 3;
@@ -108,8 +107,8 @@ void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, u
 		vuint32_t huffmanCodeBits = GSTDDEC_DEMOTE_UINT64_TO_UINT32(g_dstate.bitstreamBits[vvecIndex]);
 		vuint32_t discardBits = GSTDDEC_VECTOR_UINT32(0);
 
-		vuint32_t decodedLiterals = DecodeLiteralVector(numRefill0, huffmanCodeBits, discardBits);
-		decodedLiterals = decodedLiterals | (DecodeLiteralVector(numRefill1, huffmanCodeBits, discardBits) << GSTDDEC_VECTOR_UINT32(8));
+		vuint32_t decodedLiterals = DecodeLiteralVector(numRefill0, huffmanCodeBits, huffmanCodeMask, discardBits);
+		decodedLiterals = decodedLiterals | (DecodeLiteralVector(numRefill1, huffmanCodeBits, huffmanCodeMask, discardBits) << GSTDDEC_VECTOR_UINT32(8));
 
 		// numRefill0 will always be >= numRefill1, so it is the number of lanes to discard bits from
 		BitstreamDiscard(vvecIndex, numRefill0, discardBits);
@@ -122,7 +121,7 @@ void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, u
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT RefillLiterals()
+void GSTDDEC_FUNCTION_CONTEXT RefillLiterals(uint32_t huffmanCodeMask)
 {
 	uint32_t maxLiteralsToRefill = g_dstate.maxLiterals - g_dstate.numLiteralsEmitted;
 	uint32_t literalsToRefill = GSTDDEC_FORMAT_WIDTH * 4;
@@ -140,8 +139,8 @@ void GSTDDEC_FUNCTION_CONTEXT RefillLiterals()
 	for (uint32_t vvecIndex = 0; vvecIndex < GSTDDEC_VVEC_SIZE; vvecIndex++)
 		g_dstate.literalsBuffer[vvecIndex] = GSTDDEC_VECTOR_UINT32(0);
 
-	RefillLiteralsPartial(literalsToRefill, 0);
-	RefillLiteralsPartial(literalsToRefill, 1);
+	RefillLiteralsPartial(literalsToRefill, huffmanCodeMask, 0);
+	RefillLiteralsPartial(literalsToRefill, huffmanCodeMask, 1);
 }
 
 GSTDDEC_FUNCTION_PREFIX
@@ -203,7 +202,7 @@ void GSTDDEC_FUNCTION_CONTEXT EmitLiterals(uint32_t numLiteralsToEmit)
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted)
+void GSTDDEC_FUNCTION_CONTEXT DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted, uint32_t huffmanCodeMask)
 {
 	while (g_dstate.numLiteralsEmitted < targetLiteralsEmitted)
 	{
@@ -212,7 +211,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLiteralsToTarget(uint32_t targetLiteralsEmit
 		// The literals buffer is never completely full after an emit, so if this condition is true, then
 		// the literals buffer was completely drained and must be refilled.
 		if (literalsInBufferAfterRefill == GSTDDEC_LIT_BUFFER_BYTE_SIZE)
-			RefillLiterals();
+			RefillLiterals(huffmanCodeMask);
 
 		uint32_t literalsToEmit = GSTDDEC_MIN(literalsInBufferAfterRefill, targetLiteralsEmitted - g_dstate.numLiteralsEmitted);
 
@@ -273,7 +272,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExecuteMatchCopy(uint32_t matchLength, uint32_t ma
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
+void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord, uint32_t huffmanCodeMask)
 {
 	vuint32_t litLengthValues[GSTDDEC_VVEC_SIZE];
 	vuint32_t matchLengthValues[GSTDDEC_VVEC_SIZE];
@@ -450,7 +449,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord)
 
 				GSTDDEC_BRANCH_HINT
 				if (litLengthValue > 0)
-					DecodeLiteralsToTarget(g_dstate.numLiteralsEmitted + litLengthValue);
+					DecodeLiteralsToTarget(g_dstate.numLiteralsEmitted + litLengthValue, huffmanCodeMask);
 
 				ExecuteMatchCopy(matchLength, realOffset);
 			}
@@ -506,35 +505,114 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 	}
 	else
 	{
-		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		GSTDDEC_BRANCH_HINT
+		if (offsetsMode == GSTD_SEQ_COMPRESSION_MODE_PREDEFINED)
+		{
+			uint32_t numCells = 1 << GSTDDEC_PREDEFINED_OFFSET_CODE_ACCURACY_LOG;
+
+			for (uint32_t firstCell = 0; firstCell < numCells; firstCell += GSTDDEC_VECTOR_WIDTH)
+			{
+				vuint32_t cell = GSTDDEC_VECTOR_UINT32(firstCell) + GSTDDEC_LANE_INDEX;
+
+				GSTDDEC_VECTOR_IF(cell < GSTDDEC_VECTOR_UINT32(numCells))
+				{
+					vuint32_t cellData = GSTDDEC_VECTOR_UINT32(0);
+					GSTDDEC_CONDITIONAL_LOAD_INDEX(cellData, kPredefinedOffsetCodeTable, cell);
+					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.fseCells, cell + GSTDDEC_VECTOR_UINT32(GSTDDEC_FSETAB_OFFSET_START), cellData);
+				}
+				GSTDDEC_VECTOR_END_IF
+			}
+
+			GSTDDEC_FLUSH_GS;
+
+			g_dstate.offsetAccuracyLog = GSTDDEC_PREDEFINED_OFFSET_CODE_ACCURACY_LOG;
+		}
+		else
+		{
+			GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		}
 	}
 
+	GSTDDEC_BRANCH_HINT
 	if (matchLengthsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
 	{
 		DecodeFSETable(GSTDDEC_FSETAB_MATCH_LENGTH_START, GSTD_MAX_MATCH_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_MATCH_LENGTH_POS) & GSTD_ACCURACY_BYTE_MATCH_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_MATCH_LENGTH_ACCURACY_LOG, g_dstate.matchLengthAccuracyLog);
 	}
 	else
 	{
-		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		GSTDDEC_BRANCH_HINT
+		if (matchLengthsMode == GSTD_SEQ_COMPRESSION_MODE_PREDEFINED)
+		{
+			uint32_t numCells = 1 << GSTDDEC_PREDEFINED_MATCH_LENGTH_ACCURACY_LOG;
+
+			for (uint32_t firstCell = 0; firstCell < numCells; firstCell += GSTDDEC_VECTOR_WIDTH)
+			{
+				vuint32_t cell = GSTDDEC_VECTOR_UINT32(firstCell) + GSTDDEC_LANE_INDEX;
+
+				GSTDDEC_VECTOR_IF(cell < GSTDDEC_VECTOR_UINT32(numCells))
+				{
+					vuint32_t cellData = GSTDDEC_VECTOR_UINT32(0);
+					GSTDDEC_CONDITIONAL_LOAD_INDEX(cellData, kPredefinedMatchLengthTable, cell);
+					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.fseCells, cell + GSTDDEC_VECTOR_UINT32(GSTDDEC_FSETAB_MATCH_LENGTH_START), cellData);
+				}
+				GSTDDEC_VECTOR_END_IF
+			}
+
+			GSTDDEC_FLUSH_GS;
+
+			g_dstate.matchLengthAccuracyLog = GSTDDEC_PREDEFINED_MATCH_LENGTH_ACCURACY_LOG;
+		}
+		else
+		{
+			GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		}
 	}
 
+	GSTDDEC_BRANCH_HINT
 	if (litLengthsMode == GSTD_SEQ_COMPRESSION_MODE_FSE)
 	{
 		DecodeFSETable(GSTDDEC_FSETAB_LIT_LENGTH_START, GSTD_MAX_LIT_LENGTH_CODE, ((fseTableAccuracyByte >> GSTD_ACCURACY_BYTE_LIT_LENGTH_POS) & GSTD_ACCURACY_BYTE_LIT_LENGTH_MASK) + GSTD_MIN_ACCURACY_LOG, GSTD_MAX_LIT_LENGTH_ACCURACY_LOG, g_dstate.litLengthAccuracyLog);
 	}
 	else
 	{
-		GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		GSTDDEC_BRANCH_HINT
+		if (litLengthsMode == GSTD_SEQ_COMPRESSION_MODE_PREDEFINED)
+		{
+			uint32_t numCells = 1 << GSTDDEC_PREDEFINED_LIT_LENGTH_ACCURACY_LOG;
+
+			for (uint32_t firstCell = 0; firstCell < numCells; firstCell += GSTDDEC_VECTOR_WIDTH)
+			{
+				vuint32_t cell = GSTDDEC_VECTOR_UINT32(firstCell) + GSTDDEC_LANE_INDEX;
+
+				GSTDDEC_VECTOR_IF(cell < GSTDDEC_VECTOR_UINT32(numCells))
+				{
+					vuint32_t cellData = GSTDDEC_VECTOR_UINT32(0);
+					GSTDDEC_CONDITIONAL_LOAD_INDEX(cellData, kPredefinedLitLengthTable, cell);
+					GSTDDEC_CONDITIONAL_STORE_INDEX(gs_decompressorState.fseCells, cell + GSTDDEC_VECTOR_UINT32(GSTDDEC_FSETAB_LIT_LENGTH_START), cellData);
+				}
+				GSTDDEC_VECTOR_END_IF
+			}
+
+			GSTDDEC_FLUSH_GS;
+
+			g_dstate.litLengthAccuracyLog = GSTDDEC_PREDEFINED_LIT_LENGTH_ACCURACY_LOG;
+		}
+		else
+		{
+			GSTDDEC_WARN("NOT YET IMPLEMENTED");
+		}
 	}
 
-	g_dstate.huffmanCodeMask = finalWeightTotal - 1;
+	GSTDDEC_FLUSH_GS;
 
-	DecodeAndExecuteSequences(controlWord);
+	uint32_t huffmanCodeMask = finalWeightTotal - 1;
+
+	DecodeAndExecuteSequences(controlWord, huffmanCodeMask);
 
 	// Flush trailing literals
 	GSTDDEC_BRANCH_HINT
 	if (g_dstate.numLiteralsEmitted < g_dstate.maxLiterals)
-		DecodeLiteralsToTarget(g_dstate.maxLiterals);
+		DecodeLiteralsToTarget(g_dstate.maxLiterals, huffmanCodeMask);
 	else
 	{
 		if (g_dstate.numLiteralsEmitted > g_dstate.maxLiterals)
@@ -1725,7 +1803,8 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeFSETable(uint32_t fseTabStart, uint32_t fseT
 		GSTDDEC_VECTOR_END_IF
 	}
 
-	GSTDDEC_FLUSH_GS;
+	// NOTE: No flush GS here, we assume that it is called in the parent function instead and that
+	// no FSE table expansions overlap
 }
 
 
@@ -1748,7 +1827,6 @@ void GSTDDEC_FUNCTION_CONTEXT Run(vuint32_t laneIndex)
 	g_dstate.repeatedOffset3 = 8;
 	g_dstate.numLiteralsEmitted = 0;
 	g_dstate.maxLiterals = 0;
-	g_dstate.huffmanCodeMask = 0;
 
 	for (uint32_t i = 0; i < GSTDDEC_VVEC_SIZE; i++)
 	{
