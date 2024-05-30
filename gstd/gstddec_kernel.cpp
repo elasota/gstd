@@ -10,7 +10,7 @@ the included LICENSE.txt file.
 
 #include "gstddec_prefix_cpp.h"
 
-#include <stdio.h>
+#include "gstddec_public_constants.h"
 
 
 //GSTDDEC_MAIN_FUNCTION_DEF(vuint32_t laneIndex)
