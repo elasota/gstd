@@ -1,0 +1,291 @@
+Gstd is feature-compatible with Zstandard except for the availability of
+"less than one" probabilities in FSE table definitions.  You should refer to
+the Zstandard documentation for information on the high-level functionality
+of Zstandard.
+
+
+BITSTREAM BEHAVIOR AND INTERLEAVING
+
+Gstd streams are designed for SIMD kernels and have a "parallelism level"
+that determines the number of data units that are executed at once.  The
+default level is 32, but this is fully configurable.
+
+All streams are loaded from a stream of 32-bit words.  Typically the words
+are encoded into a byte stream with the least-significant byte first, but
+this is not required.
+
+Gstd streams are encoded as 3 separate types of bitstreams:
+- The byte stream is a single stream that is consumed 8 bits at a time,
+  starting with the least-significant 8 bits of the word.
+- The word stream is a single stream that is consumed 32 bits at
+  a time.
+- A number of parallel bitstreams exist, the number being equal to the
+  parallelism level. Parallel bitstreams are numbered from 0 to the
+  number of bitstreams minus one.
+
+Each bitstream is a FIFO bit queue.
+
+When a bitstream is "refilled," a 32-bit word is loaded from the input
+stream and appended to the end of the bitstream buffer, starting with the
+least-significant bits of the word.
+
+When a value is "read" from a bitstream, some number of bits are dequeued and
+typically interpreted as a number with the first bit dequeued from the stream
+representing the least-significant bit of the resulting number.
+
+When a bitstream is "preloaded," the decoder checks if the bitstream contains
+fewer bits than the preload amount.  If it does not, then the bitstream is
+refilled.
+
+Parallel bitstream preloads typically involve a preload count.  In such a
+case, the first N streams are preloaded sequentially, where N is the preload
+count.
+
+
+ROTATING DECODE
+
+A "rotating decode" is a process where a number of values up to the
+parallelism level are decoded at once into a FIFO queue, then read from
+the FIFO queue.
+
+When preloading a rotating decode queue, the number of streams to decode is
+calculated as the lesser of the number of streams and the number of values
+remaining to decode.  Then, that many streams are preloaded.
+
+Decoding the values is similar: The number of values to decode is determined
+in the same way as preloading, and then those values are read from the
+parallel bitstreams.
+
+
+PACKED SIZE ENCODING
+
+To decode a packed size:
+
+1. Read 1 byte from the byte stream as X.
+2. If (X mod 2) = 0, then the value is decoded as X / 2.
+3. If (X mod 4) = 0, then read 1 byte from the byte stream as Y.  The value is
+   decoded as (Y * 64) + (X / 4) + 128
+4. If (X mod 4) = 2, then read 2 bytes from the byte stream as Y and Z, in
+   that order.  The value is decoded as
+   (Z * 16384) + (Y * 64) + ((X - 2) / 4) + 16512
+
+
+
+BLOCK HEADER DECODING
+
+Read 1 word from the word stream as the control word.
+
+The format for the control word is:
+	Bits 0-19: Decompressed size
+	Bits 20-21: Block type
+	Bit 22: More blocks follow flag
+	Bit 23: Aux bit
+	Bits 24-31: Aux byte
+
+For RLE blocks, the aux byte encodes the byte to be repeated for the
+    decompressed size
+For raw blocks, the aux byte is unused
+For compressed blocks:
+	Bits 24-25: Literal block type
+	Bits 26-27: Literals length table mode
+	Bits 28-29: Offset table mode
+	Bits 30-31: Match length table mode
+
+The compressed block table mode values are the same as Zstandard.
+
+
+COMPRESSED BLOCKS
+
+Decode a packed size as the number of literals in the block.
+
+If the literals section type is 0, then the block uses raw literals encoding.
+
+If the literals section type is 1, then read 1 byte as the RLE byte to use for
+all literals.
+
+If the literals section type is 2 (Huffman with a new tree), then decode a new
+literals Huffman tree for the block.  See "Literals Huffman Tree Decoding."
+
+If the literals section type is 3, then use the Huffman table from the
+previous Huffman-encoded block.
+
+
+If any of the offset table mode, literals length table mode, or match length
+table mode are equal to 2, then read one byte which encodes the accuracy log
+of the tables.  That byte has the following structure:
+    Bits 0-1: Offset accuracy log base value
+	Bits 2-4: Match length accuracy log base value
+	Bits 5-7: Literals length accuracy log base value
+
+The accuracy log of the tables is 5 + the base value from the accuracy byte.
+
+Then repeat the following process for the offset table, match length table,
+and literals length table, in order:
+	If the table mode is equal to 0, then use the Zstandard predefined table.
+	If the table mode is equal to 1, then read one byte as the RLE value.
+    If the table mode is equal to 2, then decode a new FSE table.
+	If the table mode is equal to 3, then reuse the RLE byte or FSE table from
+	    the previous block.
+
+Decode a packed size as the number of sequences, then decode and execute
+sequences.  See "Decoding And Executing Sequences."
+
+Finally, if the number of emitted literals is less than the number of literals
+specified at the start of the block, then decode the remaining literals as
+described in the "Decoding Literals" section.
+
+
+LITERALS HUFFMAN TREE DECODING
+
+Read 1 byte from the byte stream as X.  If X = 0, then the weights are encoded
+directly, otherwise the weights are encoded using an FSE table.  Otherwise, X
+is the number of Huffman weights.
+
+For direct encoding, read 4 bits from the byte stream as the specified weight
+for each weight, then if the number of specified weights is odd, read an
+additional 4 bits.
+
+
+FSE ENCODING OF HUFFMAN VALUES
+
+For FSE encoding, first an FSE table is encoded.  The accuracy log is equal
+to (5 + Aux bit) and the maximum accuracy log is 6.  See the "FSE Table
+Decoding" section for a description of the table.
+
+Afterwards, repeat the following process:
+- Let X = Lesser of (number of parallel bitstreams) and (number of remaining weights)
+- Preload 9 bits into X parallel bitstreams.
+- Decode one FSE value from X parallel bitstreams (see the "FSE Value
+  Decoding" section)
+  
+  
+RLE ENCODING
+
+TODO
+
+
+RAW BLOCKS
+
+TODO
+
+
+RLE BLOCKS
+
+TODO
+
+
+FSE TABLE DECODING
+
+FSE tables use a similar variable-size coding scheme to the one in Zstd with
+a few differences.
+
+First, the special less-than-one probability is not supported.  Instead,
+the probability of each value is encoded directly as its value.
+
+Second, the bit usage of each value is the number of bits needed to encode
+the largest value for the remaining probability.  Unlike in Zstandard, the
+bit usage is not reduced for some values, so it is possible for an overflow
+to occur from invalid data.  The behavior in such an overflow condition is
+undefined, but the reference decoder will cap the overflowing value to the
+maximum possible value and ignore all following values.
+
+Third, the zero probability repeat encoding is different.  If a value of
+zero is decoded, then an additional repeat count is decoded from the next
+3 bits of the same bitstream.  Unlike in Zstandard, this is always limited
+to a repeat count of 7.
+
+Weights are decoded using a rotating decode.  The preload size in bits is
+equal to (4 + the maximum accuracy log).  Unlike most rotating decodes, FSE
+tables have no count known in advance, so all parallel bitstreams are
+preloaded during preload steps.
+
+FSE probability values are read in the following sequence:
+- Preload the rotating decoder
+- Decode the probability
+- If the probability is zero, decode another 3 bits as the repeat count
+  from the same bitstream.
+
+
+HUFFMAN CODES
+
+Huffman codes are computed in the same way as Zstandard, except that the bit
+order is reversed due to Gstd always reading least-significant-bit first.
+
+
+
+FSE VALUE DECODING
+
+Unlike in Zstandard, Gstd uses a "state chaining" mechanism where only a
+single state value is maintained for all FSE tables, even though the bit
+usage of the state value differs for each FSE table.
+
+To accomodate this, when transitioning to other FSE states, the low bits
+corresponding to the table precision are updated and any bits above the
+ones that are left as their former value.
+
+Additionally, if a Huffman weight table is FSE encoded, the final state value
+is used for further sequence decoding.
+
+FSE values are decoding using a rotating decode.
+
+
+FSE REPLENISHMENT
+
+All FSE decoder states begin in a "drained" state with an initial state of 0
+and a replenish count of 9.  Any time an FSE value is requested the decoder
+must perform the following actions:
+- Read as many bits as are required by the stream drain level.
+- Add the bits to the current state value.
+- Use the state value to determine the symbol and baseline from the FSE table.
+- Replace the FSE state with the new baseline and the drain level to the
+  number of bits in the FSE table entry.
+
+
+DECODING AND EXECUTING SEQUENCES
+
+Sequence coefficients are decoded using rotating decode.
+
+The decode process for coefficients is as follows:
+- Preload 26 bits
+- Decode the literal length code
+- Decode the match length code
+- Decode the offset code
+- Preload 32 bits
+- Read the literal length low bits
+- Read the match length low bits
+- Preload 31 bits
+- Read the offset low bits
+
+Afterwards, sequence execution proceeds as defined by Zstandard.  After each
+match, if the literal length is non-zero, then literals are decoded as
+specified in "Decoding Literals."
+
+
+DECODING LITERALS
+
+If literals are Huffman compressed, then literals are decoded using rotating
+decode, except that 4 bytes are loaded for each parallel bitstream.  The
+process for decoding literals is as follows:
+
+- Preload 22 bits
+- Decode literal A
+- Decode literal B
+- Preload 22
+- Decode literal C
+- Decode literal D
+
+In the resulting literal values queue, the literal values are queued in order
+as A, B, C, D for each parallel bitstream, followed by the values for the next
+parallel bitstream.
+
+Note that the final bitstream may contain anywhere from 1 to 4 values.  The
+second preload only occurs if there are 3 or 4 literals for that bitstream.
+
+
+If literals are raw compressed, then literals are are decoded using rotating
+decode as follows instead:
+- Preload 32 bits
+- Decode literal A
+- Decode literal B
+- Decode literal C
+- Decode literal D
