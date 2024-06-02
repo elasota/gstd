@@ -928,7 +928,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExpandLitHuffmanTable(uint32_t numSpecifiedWeights
 		GSTDDEC_VECTOR_END_IF
 	}
 
-	uint32_t numEncodedClusters = ((1 << GSTDDEC_MAX(weightBits, GSTD_MAX_HUFFMAN_CODE_LENGTH)) + 3) / 4;
+	uint32_t numEncodedClusters = ((1 << GSTDDEC_MIN(weightBits, GSTD_MAX_HUFFMAN_CODE_LENGTH)) + 3) / 4;
 	uint32_t numDecodeTableDWords = numEncodedClusters * 3;
 
 	for (uint32_t firstPackedDecDWord = 0; firstPackedDecDWord < numDecodeTableDWords; firstPackedDecDWord += GSTDDEC_VECTOR_WIDTH)
@@ -1187,7 +1187,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 
 		uint32_t numWeightsInExistingUncompressedBytes = g_dstate.uncompressedBytesAvailable * 2;
 
-		for (uint32_t firstWeight = 0; firstWeight < (numSpecifiedWeights + GSTDDEC_VECTOR_WIDTH - 1) / GSTDDEC_VECTOR_WIDTH; firstWeight++)
+		for (uint32_t firstWeight = 0; firstWeight < numSpecifiedWeights; firstWeight += GSTDDEC_VECTOR_WIDTH)
 		{
 			vuint32_t weightIndex = GSTDDEC_VECTOR_UINT32(firstWeight) + laneIndex;
 			vuint32_t weight = GSTDDEC_VECTOR_UINT32(0);
@@ -1217,7 +1217,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 					GSTDDEC_WARN("Weight exceeded maximum");
 				}
 
-				weight = GSTDDEC_MAX(weight, GSTDDEC_VECTOR_UINT32(GSTD_MAX_HUFFMAN_WEIGHT));
+				weight = GSTDDEC_MIN(weight, GSTDDEC_VECTOR_UINT32(GSTD_MAX_HUFFMAN_WEIGHT));
 #endif
 			}
 			GSTDDEC_VECTOR_END_IF
@@ -1236,16 +1236,19 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 
 		GSTDDEC_FLUSH_GS;
 
-		if (numSpecifiedWeights > numWeightsInExistingUncompressedBytes)
+		uint32_t weightBytesConsumed = (numSpecifiedWeights + 1) / 2;
+		if (weightBytesConsumed > numWeightsInExistingUncompressedBytes)
 		{
-			uint32_t bytesConsumedFromReadPos = (numSpecifiedWeights + 1) / 2 - g_dstate.uncompressedBytesAvailable;
+			uint32_t bytesConsumedFromReadPos = weightBytesConsumed - g_dstate.uncompressedBytesAvailable;
 			g_dstate.readPos += bytesConsumedFromReadPos / 4;
-			if ((bytesConsumedFromReadPos & 3) == 0)
+
+			uint32_t bytesConsumedFromNextDWord = (bytesConsumedFromReadPos & 3);
+			if (bytesConsumedFromNextDWord == 0)
 				g_dstate.uncompressedBytesAvailable = 0;
 			else
 			{
-				g_dstate.uncompressedBytes = GSTDDEC_READ_INPUT_DWORD(g_dstate.readPos);
-				g_dstate.uncompressedBytesAvailable = 4 - (bytesConsumedFromReadPos & 3);
+				g_dstate.uncompressedBytes = GSTDDEC_READ_INPUT_DWORD(g_dstate.readPos) >> (bytesConsumedFromNextDWord * 8);
+				g_dstate.uncompressedBytesAvailable = 4 - bytesConsumedFromNextDWord;
 				g_dstate.readPos++;
 			}
 		}
