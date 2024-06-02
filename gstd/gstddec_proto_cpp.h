@@ -119,13 +119,14 @@ namespace gstddec
 		void DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord);
 
 		vuint32_t DecodeLiteralVector(uint32_t numLanes, vuint32_t codeBits, uint32_t huffmanCodeMask, vuint32_t &inOutDiscardBits);
-		void RefillLiteralsPartial(uint32_t literalsToRefill, uint32_t huffmanCodeMask, uint32_t passIndex);
-		void RefillLiterals(uint32_t huffmanCodeMask);
+		void RefillHuffmanLiteralsPartial(uint32_t literalsToRefill, uint32_t huffmanCodeMask, uint32_t passIndex);
+		void RefillHuffmanLiterals(uint32_t huffmanCodeMask);
+		void RefillRawLiterals();
 		void EmitLiterals(uint32_t literalsToEmit);
 
-		void DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted, uint32_t huffmanCodeMask);
+		void DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted, uint32_t litSectionType, uint32_t huffmanCodeMask);
 		void ExecuteMatchCopy(uint32_t matchLength, uint32_t matchOffset);
-		void DecodeAndExecuteSequences(uint32_t controlWord, uint32_t huffmanCodeMask);
+		void DecodeAndExecuteSequences(uint32_t litSectionType, uint32_t huffmanCodeMask);
 		void ClearLitHuffmanTree();
 		void DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit, uint32_t &outWeightTotal);
 		void ExpandLitHuffmanTable(uint32_t numSpecifiedWeights, uint32_t weightTotal, uint32_t &outWeightTotal);

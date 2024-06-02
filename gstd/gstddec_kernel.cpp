@@ -64,7 +64,7 @@ GSTDDEC_TYPE_CONTEXT vuint32_t GSTDDEC_FUNCTION_CONTEXT DecodeLiteralVector(uint
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, uint32_t huffmanCodeMask, uint32_t passIndex)
+void GSTDDEC_FUNCTION_CONTEXT RefillHuffmanLiteralsPartial(uint32_t literalsToRefill, uint32_t huffmanCodeMask, uint32_t passIndex)
 {
 	// This function refills 0-2 literals into each lane
 	uint32_t refillNudge = 3;
@@ -121,7 +121,7 @@ void GSTDDEC_FUNCTION_CONTEXT RefillLiteralsPartial(uint32_t literalsToRefill, u
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT RefillLiterals(uint32_t huffmanCodeMask)
+void GSTDDEC_FUNCTION_CONTEXT RefillHuffmanLiterals(uint32_t huffmanCodeMask)
 {
 	uint32_t maxLiteralsToRefill = g_dstate.maxLiterals - g_dstate.numLiteralsEmitted;
 	uint32_t literalsToRefill = GSTDDEC_FORMAT_WIDTH * 4;
@@ -139,8 +139,58 @@ void GSTDDEC_FUNCTION_CONTEXT RefillLiterals(uint32_t huffmanCodeMask)
 	for (uint32_t vvecIndex = 0; vvecIndex < GSTDDEC_VVEC_SIZE; vvecIndex++)
 		g_dstate.literalsBuffer[vvecIndex] = GSTDDEC_VECTOR_UINT32(0);
 
-	RefillLiteralsPartial(literalsToRefill, huffmanCodeMask, 0);
-	RefillLiteralsPartial(literalsToRefill, huffmanCodeMask, 1);
+	RefillHuffmanLiteralsPartial(literalsToRefill, huffmanCodeMask, 0);
+	RefillHuffmanLiteralsPartial(literalsToRefill, huffmanCodeMask, 1);
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT RefillRawLiterals()
+{
+	uint32_t maxLiteralsToRefill = g_dstate.maxLiterals - g_dstate.numLiteralsEmitted;
+	uint32_t literalsToRefill = GSTDDEC_FORMAT_WIDTH * 4;
+
+#if GSTDDEC_SANITIZE
+	if (g_dstate.maxLiterals < g_dstate.numLiteralsEmitted)
+	{
+		GSTDDEC_WARN("Literals read overrun");
+		maxLiteralsToRefill = 0;
+	}
+#endif
+
+	literalsToRefill = GSTDDEC_MIN(literalsToRefill, maxLiteralsToRefill);
+
+	for (uint32_t vvecIndex = 0; vvecIndex < GSTDDEC_VVEC_SIZE; vvecIndex++)
+		g_dstate.literalsBuffer[vvecIndex] = GSTDDEC_VECTOR_UINT32(0);
+
+	uint32_t numLanesToRefill = (literalsToRefill + 3) / 4;
+	uint32_t numVVecToRefill = (numLanesToRefill + GSTDDEC_VECTOR_WIDTH - 1) / GSTDDEC_VECTOR_WIDTH;
+
+	for (uint32_t vvecIndex = 0; vvecIndex < numVVecToRefill; vvecIndex++)
+	{
+		uint32_t litRefillStart = vvecIndex * GSTDDEC_VECTOR_WIDTH * 4;
+		uint32_t laneStart = vvecIndex * GSTDDEC_VECTOR_WIDTH;
+
+		uint32_t numLanesToRefillThisVVec = GSTDDEC_MIN(GSTDDEC_VECTOR_WIDTH, numLanesToRefill - laneStart);
+		vuint32_t laneLitStart = (GSTDDEC_VECTOR_UINT32(vvecIndex * GSTDDEC_VECTOR_WIDTH) + GSTDDEC_LANE_INDEX) << GSTDDEC_VECTOR_UINT32(2);
+		vuint32_t litsAvailableInLane = GSTDDEC_MAX(GSTDDEC_VECTOR_UINT32(maxLiteralsToRefill), laneLitStart) - laneLitStart;
+		vuint32_t litsToRefillInLane = GSTDDEC_MIN(litsAvailableInLane, GSTDDEC_VECTOR_UINT32(4));
+
+		vuint32_t litsToDropFromLane = GSTDDEC_VECTOR_UINT32(4) - litsToRefillInLane;
+
+		// This produces undefined values for lanes that drop 4 bits, so we need to be careful to ignore those lanes
+		vuint32_t litKeepMask = GSTDDEC_VECTOR_UINT32(0xffffffffu) >> (litsToDropFromLane << GSTDDEC_VECTOR_UINT32(3));
+
+		BitstreamPeekNoTruncate(vvecIndex, numLanesToRefillThisVVec, 32);
+		vuint32_t litValues = GSTDDEC_DEMOTE_UINT64_TO_UINT32(g_dstate.bitstreamBits[vvecIndex]) & litKeepMask;
+
+		BitstreamDiscard(vvecIndex, numLanesToRefillThisVVec, litsToRefillInLane << GSTDDEC_VECTOR_UINT32(3));
+
+		GSTDDEC_VECTOR_IF(GSTDDEC_LANE_INDEX < GSTDDEC_VECTOR_UINT32(numLanesToRefillThisVVec))
+		{
+			GSTDDEC_CONDITIONAL_STORE(g_dstate.literalsBuffer[vvecIndex], litValues);
+		}
+		GSTDDEC_VECTOR_END_IF
+	}
 }
 
 GSTDDEC_FUNCTION_PREFIX
@@ -202,20 +252,60 @@ void GSTDDEC_FUNCTION_CONTEXT EmitLiterals(uint32_t numLiteralsToEmit)
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted, uint32_t huffmanCodeMask)
+void GSTDDEC_FUNCTION_CONTEXT DecodeLiteralsToTarget(uint32_t targetLiteralsEmitted, uint32_t litSectionType, uint32_t huffmanCodeMask)
 {
-	while (g_dstate.numLiteralsEmitted < targetLiteralsEmitted)
+	GSTDDEC_BRANCH_HINT
+	if (litSectionType == GSTD_LITERALS_SECTION_TYPE_RLE)
 	{
-		uint32_t literalsInBufferAfterRefill = GSTDDEC_LIT_BUFFER_BYTE_SIZE - (g_dstate.numLiteralsEmitted % GSTDDEC_LIT_BUFFER_BYTE_SIZE);
+		uint32_t lit = g_dstate.litRLEByte;
 
-		// The literals buffer is never completely full after an emit, so if this condition is true, then
-		// the literals buffer was completely drained and must be refilled.
-		if (literalsInBufferAfterRefill == GSTDDEC_LIT_BUFFER_BYTE_SIZE)
-			RefillLiterals(huffmanCodeMask);
+		while (g_dstate.numLiteralsEmitted < targetLiteralsEmitted)
+		{
+			uint32_t literalsToEmit = GSTDDEC_MIN(GSTDDEC_VECTOR_WIDTH, targetLiteralsEmitted - g_dstate.numLiteralsEmitted);
 
-		uint32_t literalsToEmit = GSTDDEC_MIN(literalsInBufferAfterRefill, targetLiteralsEmitted - g_dstate.numLiteralsEmitted);
+			GSTDDEC_VECTOR_IF(GSTDDEC_LANE_INDEX < GSTDDEC_VECTOR_UINT32(literalsToEmit))
+			{
+				vuint32_t litWritePosByte = GSTDDEC_VECTOR_UINT32(g_dstate.writePosByte) + GSTDDEC_LANE_INDEX;
 
-		EmitLiterals(literalsToEmit);
+				vuint32_t litWriteDWordIndex = GSTDDEC_VECTOR_UINT32(0);
+				vuint32_t litWriteBitPos = GSTDDEC_VECTOR_UINT32(0);
+				uint32_t litWriteMask = 0;
+
+				ResolvePackedAddress8(litWritePosByte, litWriteDWordIndex, litWriteBitPos, litWriteMask);
+
+				vuint32_t litWriteValue = (GSTDDEC_VECTOR_UINT32(lit) & GSTDDEC_VECTOR_UINT32(litWriteMask)) << litWriteBitPos;
+
+				InterlockedOrOutputDWord(GSTDDEC_CALL_EXECUTION_MASK litWriteDWordIndex, litWriteValue);
+			}
+			GSTDDEC_VECTOR_END_IF
+			
+			g_dstate.writePosByte += literalsToEmit;
+			g_dstate.numLiteralsEmitted += literalsToEmit;
+		}
+
+		GSTDDEC_WARN("NOT TESTED");
+	}
+	else
+	{
+		while (g_dstate.numLiteralsEmitted < targetLiteralsEmitted)
+		{
+			uint32_t literalsInBufferAfterRefill = GSTDDEC_LIT_BUFFER_BYTE_SIZE - (g_dstate.numLiteralsEmitted % GSTDDEC_LIT_BUFFER_BYTE_SIZE);
+
+			// The literals buffer is never completely full after an emit, so if this condition is true, then
+			// the literals buffer was completely drained and must be refilled.
+			if (literalsInBufferAfterRefill == GSTDDEC_LIT_BUFFER_BYTE_SIZE)
+			{
+				GSTDDEC_BRANCH_HINT
+				if (litSectionType == GSTD_LITERALS_SECTION_TYPE_HUFFMAN)
+					RefillHuffmanLiterals(huffmanCodeMask);
+				else
+					RefillRawLiterals();
+			}
+
+			uint32_t literalsToEmit = GSTDDEC_MIN(literalsInBufferAfterRefill, targetLiteralsEmitted - g_dstate.numLiteralsEmitted);
+
+			EmitLiterals(literalsToEmit);
+		}
 	}
 
 	GSTDDEC_FLUSH_OUTPUT;
@@ -272,16 +362,16 @@ void GSTDDEC_FUNCTION_CONTEXT ExecuteMatchCopy(uint32_t matchLength, uint32_t ma
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord, uint32_t huffmanCodeMask)
+void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t litSectionType, uint32_t huffmanCodeMask)
 {
 	vuint32_t litLengthValues[GSTDDEC_VVEC_SIZE];
 	vuint32_t matchLengthValues[GSTDDEC_VVEC_SIZE];
 	vuint32_t offsetValues[GSTDDEC_VVEC_SIZE];
 
-	uint32_t litSectionType = ((controlWord >> GSTD_CONTROL_LIT_SECTION_TYPE_OFFSET) & GSTD_CONTROL_LIT_SECTION_TYPE_MASK);
-	uint32_t litLengthsMode = ((controlWord >> GSTD_CONTROL_LIT_LENGTH_MODE_OFFSET) & GSTD_CONTROL_LIT_LENGTH_MODE_MASK);
-	uint32_t offsetsMode = ((controlWord >> GSTD_CONTROL_OFFSET_MODE_OFFSET) & GSTD_CONTROL_OFFSET_MODE_MASK);
-	uint32_t matchLengthsMode = ((controlWord >> GSTD_CONTROL_MATCH_LENGTH_MODE_OFFSET) & GSTD_CONTROL_MATCH_LENGTH_MODE_MASK);
+	//uint32_t litSectionType = ((controlWord >> GSTD_CONTROL_LIT_SECTION_TYPE_OFFSET) & GSTD_CONTROL_LIT_SECTION_TYPE_MASK);
+	//uint32_t litLengthsMode = ((controlWord >> GSTD_CONTROL_LIT_LENGTH_MODE_OFFSET) & GSTD_CONTROL_LIT_LENGTH_MODE_MASK);
+	//uint32_t offsetsMode = ((controlWord >> GSTD_CONTROL_OFFSET_MODE_OFFSET) & GSTD_CONTROL_OFFSET_MODE_MASK);
+	//uint32_t matchLengthsMode = ((controlWord >> GSTD_CONTROL_MATCH_LENGTH_MODE_OFFSET) & GSTD_CONTROL_MATCH_LENGTH_MODE_MASK);
 
 	uint32_t numSequences = 0;
 	
@@ -449,7 +539,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t controlWord, ui
 
 				GSTDDEC_BRANCH_HINT
 				if (litLengthValue > 0)
-					DecodeLiteralsToTarget(g_dstate.numLiteralsEmitted + litLengthValue, huffmanCodeMask);
+					DecodeLiteralsToTarget(g_dstate.numLiteralsEmitted + litLengthValue, litSectionType, huffmanCodeMask);
 
 				ExecuteMatchCopy(matchLength, realOffset);
 			}
@@ -468,7 +558,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 
 	uint32_t regeneratedSize = 0;
 
-	uint32_t finalWeightTotal = 0;
+	uint32_t huffmanCodeMask = 0;
 
 	uint32_t numSequences = 0;
 	uint32_t fseTableAccuracyByte = 0;
@@ -477,18 +567,31 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 
 	GSTDDEC_BRANCH_HINT
 	if (litSectionType == GSTD_LITERALS_SECTION_TYPE_HUFFMAN)
+	{
+		uint32_t finalWeightTotal = 0;
 		DecodeLitHuffmanTree(laneIndex, auxBit, finalWeightTotal);
+		huffmanCodeMask = finalWeightTotal - 1;
+	}
 	else
 	{
 		GSTDDEC_BRANCH_HINT
 		if (litSectionType == GSTD_LITERALS_SECTION_TYPE_RLE)
 		{
 			DecodeLitRLEByte();
+			GSTDDEC_WARN("NOT YET IMPLEMENTED");
 		}
-
-		GSTDDEC_WARN("NOT YET IMPLEMENTED");
-
-		finalWeightTotal = 256;
+		else
+		{
+			GSTDDEC_BRANCH_HINT
+			if (litSectionType == GSTD_LITERALS_SECTION_TYPE_HUFFMAN_REUSE)
+			{
+				GSTDDEC_WARN("NOT YET IMPLEMENTED");
+			}
+			// else if (litSectioNType == GSTD_LITERALS_SECTION_TYPE_RAW)
+			//{
+			//	Nothing to do in this case
+			//}
+		}
 	}
 
 	GSTDDEC_BRANCH_HINT
@@ -523,8 +626,6 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 				GSTDDEC_VECTOR_END_IF
 			}
 
-			GSTDDEC_FLUSH_GS;
-
 			g_dstate.offsetAccuracyLog = GSTDDEC_PREDEFINED_OFFSET_CODE_ACCURACY_LOG;
 		}
 		else
@@ -557,8 +658,6 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 				}
 				GSTDDEC_VECTOR_END_IF
 			}
-
-			GSTDDEC_FLUSH_GS;
 
 			g_dstate.matchLengthAccuracyLog = GSTDDEC_PREDEFINED_MATCH_LENGTH_ACCURACY_LOG;
 		}
@@ -593,8 +692,6 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 				GSTDDEC_VECTOR_END_IF
 			}
 
-			GSTDDEC_FLUSH_GS;
-
 			g_dstate.litLengthAccuracyLog = GSTDDEC_PREDEFINED_LIT_LENGTH_ACCURACY_LOG;
 		}
 		else
@@ -605,14 +702,12 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 
 	GSTDDEC_FLUSH_GS;
 
-	uint32_t huffmanCodeMask = finalWeightTotal - 1;
-
-	DecodeAndExecuteSequences(controlWord, huffmanCodeMask);
+	DecodeAndExecuteSequences(litSectionType, huffmanCodeMask);
 
 	// Flush trailing literals
 	GSTDDEC_BRANCH_HINT
 	if (g_dstate.numLiteralsEmitted < g_dstate.maxLiterals)
-		DecodeLiteralsToTarget(g_dstate.maxLiterals, huffmanCodeMask);
+		DecodeLiteralsToTarget(g_dstate.maxLiterals, litSectionType, huffmanCodeMask);
 	else
 	{
 		if (g_dstate.numLiteralsEmitted > g_dstate.maxLiterals)
@@ -1082,11 +1177,13 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 	if (numSpecifiedWeights == 0)
 	{
 		numSpecifiedWeights = ReadRawByte();
+#if GSTDDEC_SANITIZE
 		if (numSpecifiedWeights == 0)
 		{
 			GSTDDEC_WARN("Huffman table had 0 specified weights");
 			numSpecifiedWeights = 1;
 		}
+#endif
 
 		uint32_t numWeightsInExistingUncompressedBytes = g_dstate.uncompressedBytesAvailable * 2;
 
@@ -1528,7 +1625,16 @@ uint32_t GSTDDEC_FUNCTION_CONTEXT ReadPackedSize()
 GSTDDEC_FUNCTION_PREFIX
 void GSTDDEC_FUNCTION_CONTEXT BitstreamDiscard(uint32_t vvecIndex, uint32_t numLanesToDiscard, vuint32_t numBits)
 {
-	if (GSTDDEC_VECTOR_ANY(g_dstate.bitstreamAvailable[vvecIndex] < numBits))
+	vbool_t anyProblem = GSTDDEC_VECTOR_BOOL(false);
+
+	GSTDDEC_VECTOR_IF(GSTDDEC_LANE_INDEX < GSTDDEC_VECTOR_UINT32(numLanesToDiscard))
+	{
+		vbool_t laneHasProblem = g_dstate.bitstreamAvailable[vvecIndex] < numBits;
+		GSTDDEC_CONDITIONAL_STORE(anyProblem, laneHasProblem);
+	}
+	GSTDDEC_VECTOR_END_IF
+
+	if (GSTDDEC_VECTOR_ANY(anyProblem))
 	{
 		GSTDDEC_WARN("Flushed too many bits from the stream");
 	}

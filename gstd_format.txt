@@ -34,19 +34,38 @@ typically interpreted as a number with the first bit dequeued from the stream
 representing the least-significant bit of the resulting number.
 
 When a bitstream is "preloaded," the decoder checks if the bitstream contains
-fewer bits than the preload amount.  If it does not, then the bitstream is
-refilled.
-
-Parallel bitstream preloads typically involve a preload count.  In such a
-case, the first N streams are preloaded sequentially, where N is the preload
-count.
+at least as many bits than the preload amount.  If it does not, then the
+bitstream is refilled.
 
 
 ROTATING DECODE
 
 A "rotating decode" is a process where a number of values up to the
 parallelism level are decoded at once into a FIFO queue, then read from
-the FIFO queue.
+the FIFO queue.  Multiple types of values can be decoded via rotating decode
+process and the FIFO queues for each type of value are independent.
+
+The following rotating decode FIFO queues exist and are decoded independently:
+- Huffman weights
+- FSE table probabilities
+- Literal length FSE values
+- Match length FSE values
+- Offset FSE values
+- Literal length bits
+- Match length bits
+- Offset code bits
+- Literal value A
+- Literal value B
+- Literal value C
+- Literal value D
+
+Additionally, FIFO queues can reset their rotation at specific points, in
+which case the next value to read into the FIFO queue will be read from
+the first bitstream instead of the one after the previous value.
+
+Huffman weights rotation is reset before each Huffman tree definition.
+FSE table probability rotation is reset before each FSE table definition.
+All other rotations are reset at the start of a block.
 
 When preloading a rotating decode queue, the number of streams to decode is
 calculated as the lesser of the number of streams and the number of values
@@ -138,26 +157,29 @@ described in the "Decoding Literals" section.
 LITERALS HUFFMAN TREE DECODING
 
 Read 1 byte from the byte stream as X.  If X = 0, then the weights are encoded
-directly, otherwise the weights are encoded using an FSE table.  Otherwise, X
-is the number of Huffman weights.
+directly, otherwise the weights are encoded using an FSE table and X is the
+number of specified Huffman weights.  See "FSE Encoding of Huffman Weights"
+for a description of this format.
 
-For direct encoding, read 4 bits from the byte stream as the specified weight
-for each weight, then if the number of specified weights is odd, read an
-additional 4 bits.
+For direct encoding, read 1 byte from the byte stream as the number of
+specified weights.  For each specified weight, read 4 bits from the byte
+stream as the specified weight for each weight, then if the number of
+specified weights is odd, read an additional 4 bits as padding.
 
 
-FSE ENCODING OF HUFFMAN VALUES
+FSE ENCODING OF HUFFMAN WEIGHTS
 
 For FSE encoding, first an FSE table is encoded.  The accuracy log is equal
 to (5 + Aux bit) and the maximum accuracy log is 6.  See the "FSE Table
 Decoding" section for a description of the table.
 
-Afterwards, repeat the following process:
-- Let X = Lesser of (number of parallel bitstreams) and (number of remaining weights)
-- Preload 9 bits into X parallel bitstreams.
-- Decode one FSE value from X parallel bitstreams (see the "FSE Value
-  Decoding" section)
-  
+Huffman weights are decoding using rotating decode and the rotation resets
+at the start of each Huffman table definition.
+
+The process for decoding each weight is as follows:
+- Preload 9 bits
+- Decode one FSE value (see the "FSE Value Decoding" section)
+
   
 RLE ENCODING
 
@@ -194,10 +216,11 @@ zero is decoded, then an additional repeat count is decoded from the next
 3 bits of the same bitstream.  Unlike in Zstandard, this is always limited
 to a repeat count of 7.
 
-Weights are decoded using a rotating decode.  The preload size in bits is
-equal to (4 + the maximum accuracy log).  Unlike most rotating decodes, FSE
-tables have no count known in advance, so all parallel bitstreams are
-preloaded during preload steps.
+Probabilities are decoded using a rotating decode and the rotation resets at
+the start of each table definition.  The preload size in bits is equal to
+(4 + the maximum accuracy log).  Unlike most rotating decodes, FSE tables
+have no count known in advance, so all parallel bitstreams are preloaded
+during preload steps.
 
 FSE probability values are read in the following sequence:
 - Preload the rotating decoder
@@ -226,19 +249,25 @@ ones that are left as their former value.
 Additionally, if a Huffman weight table is FSE encoded, the final state value
 is used for further sequence decoding.
 
-FSE values are decoding using a rotating decode.
+There are as many FSE state values and drain levels as there are parallel
+bitstreams.  The initial value of each state is 0 and the initial drain level
+is 9 bits.  The FSE state is not reset between blocks and is only initialized
+at the start of the Gstd stream.
 
+FSE values are decoding using a rotating decode and the state and drain level
+to use correspond to the bitstream accessed by the rotating decode process.
 
-FSE REPLENISHMENT
-
-All FSE decoder states begin in a "drained" state with an initial state of 0
-and a replenish count of 9.  Any time an FSE value is requested the decoder
-must perform the following actions:
+Whenever an FSE value is decoded, the following actions are performed:
 - Read as many bits as are required by the stream drain level.
 - Add the bits to the current state value.
 - Use the state value to determine the symbol and baseline from the FSE table.
 - Replace the FSE state with the new baseline and the drain level to the
   number of bits in the FSE table entry.
+
+Note that this process does NOT specify a preload, even though the preload
+is required for the bitstream read.  The preload size varies by decode step
+and some steps involve preloads that preload enough bits for multiple FSE
+value reads.
 
 
 DECODING AND EXECUTING SEQUENCES
