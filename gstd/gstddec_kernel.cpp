@@ -394,7 +394,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t litSectionType,
 			uint32_t firstValueOffset = vvecIndex * GSTDDEC_VECTOR_WIDTH;
 			uint32_t lanesToLoad = GSTDDEC_MIN(numValuesToRefill - firstValueOffset, GSTDDEC_VECTOR_WIDTH);
 			
-			BitstreamPeekNoTruncate(vvecIndex, lanesToLoad, GSTD_MAX_OFFSET_ACCURACY_LOG + GSTD_MAX_LIT_LENGTH_ACCURACY_LOG + GSTD_MAX_MATCH_LENGTH_ACCURACY_LOG);
+			BitstreamPeekNoTruncate(vvecIndex, lanesToLoad, GSTD_MAX_ACCURACY_LOG * 3);
 
 			vuint32_t litLengthCode = DecodeFSEValueNoPeek(lanesToLoad, vvecIndex, g_dstate.litLengthAccuracyLog, GSTDDEC_FSETAB_LIT_LENGTH_START);
 			vuint32_t matchLengthCode = DecodeFSEValueNoPeek(lanesToLoad, vvecIndex, g_dstate.matchLengthAccuracyLog, GSTDDEC_FSETAB_MATCH_LENGTH_START);

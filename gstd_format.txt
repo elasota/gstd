@@ -275,7 +275,7 @@ DECODING AND EXECUTING SEQUENCES
 Sequence coefficients are decoded using rotating decode.
 
 The decode process for coefficients is as follows:
-- Preload 26 bits
+- Preload 27 bits
 - Decode the literal length code
 - Decode the match length code
 - Decode the offset code
