@@ -23,6 +23,7 @@ the included LICENSE.txt file.
 #include <stdarg.h>
 
 #include "gstddec_public_constants.h"
+#include "libdeflate.h"
 
 struct ThreadedTaskWorkerState;
 struct SerializedTaskGlobalState;
@@ -541,11 +542,13 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool statsMode);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
+	void WriteStatsToOutput(size_t filePos, size_t uncompressedSize, size_t zstdCompressedSize, size_t gstdCompressedSize, size_t gdeflateCompressedSize);
 
+	bool IsStatsMode() const;
 	size_t NumPages() const;
 	size_t PageSize() const;
 	size_t GlobalSize() const;
@@ -574,12 +577,14 @@ private:
 
 	bool m_isIsolateBlock;
 	unsigned int m_isolateBlock;
+
+	bool m_isStatsMode;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool statsMode)
 	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize)
 	, m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
-	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock)
+	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock), m_isStatsMode(statsMode)
 {
 }
 
@@ -613,6 +618,16 @@ void CompressionGlobal::WriteToOutput(const void *src, uint32_t crc, size_t comp
 	fwrite(src, 1, compressedSize, m_outF);
 }
 
+void CompressionGlobal::WriteStatsToOutput(size_t filePos, size_t uncompressedSize, size_t zstdCompressedSize, size_t gstdCompressedSize, size_t gdeflateCompressedSize)
+{
+	std::lock_guard<std::mutex> lock(m_outFileMutex);
+	fprintf(m_outF, "%zu\t%zu\t%zu\t%zu\t%zu\n", filePos, uncompressedSize, zstdCompressedSize, gstdCompressedSize, gdeflateCompressedSize);
+}
+
+bool CompressionGlobal::IsStatsMode() const
+{
+	return m_isStatsMode;
+}
 
 size_t CompressionGlobal::NumPages() const
 {
@@ -657,6 +672,7 @@ unsigned int CompressionGlobal::IsolateBlock() const
 class CompressionTask : public ThreadedTaskBase
 {
 public:
+
 	CompressionTask();
 	~CompressionTask();
 
@@ -667,6 +683,17 @@ public:
 
 private:
 	size_t ComputeCurrentPageSize() const;
+
+	struct Stats
+	{
+		size_t m_filePos;
+		size_t m_uncompressedSize;
+		size_t m_zstdCompressedSize;
+		size_t m_gstdCompressedSize;
+		size_t m_gdeflateCompressedSize;
+	};
+
+	Stats m_stats;
 
 	size_t m_workUnit;
 	size_t m_compressedSize;
@@ -763,12 +790,46 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 
 	m_compressedSize = ZSTD_compress2(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize);
 
+	m_stats.m_zstdCompressedSize = m_compressedSize;
+	m_stats.m_filePos = workUnit * m_cglobal->PageSize();
+	m_stats.m_uncompressedSize = currentPageSize;
+
 	ZSTD_CCtx_reset(m_ctx, ZSTD_reset_session_and_parameters);
 
 	m_transcodeReadPos = 0;
 	m_transcodedSize = 0;
 
 	zstdhl_ResultCode_t transcodeResult = gstd_Encoder_Transcode(m_encState, &m_streamSource, &m_memAlloc);
+
+	if (m_transcodedSize == 0)
+	{
+		int n = 0;
+	}
+
+	m_stats.m_gstdCompressedSize = m_transcodedSize;
+
+	if (m_cglobal->IsStatsMode())
+	{
+		libdeflate_gdeflate_compressor *cmp = libdeflate_alloc_gdeflate_compressor(12);
+		size_t nPages = 0;
+		size_t libdeflateBounds = libdeflate_gdeflate_compress_bound(cmp, currentPageSize, &nPages);
+
+		libdeflate_gdeflate_out_page *pages = new libdeflate_gdeflate_out_page[nPages];
+
+		for (size_t i = 0; i < nPages; i++)
+			pages[i].data = new char[libdeflateBounds * 2];
+
+		libdeflate_gdeflate_compress(cmp, m_inputData, currentPageSize, pages, nPages);
+
+		m_stats.m_gdeflateCompressedSize = pages[0].nbytes;
+
+		for (size_t i = 0; i < nPages; i++)
+			delete[] static_cast<char *>(pages[i].data);
+
+		delete[] pages;
+
+		libdeflate_free_gdeflate_compressor(cmp);
+	}
 
 	if (transcodeResult != ZSTDHL_RESULT_OK)
 	{
@@ -812,6 +873,11 @@ void CompressionTask::FinishWritingWorkUnit()
 	if (m_cglobal->IsIsolateBlock() && m_cglobal->IsolateBlock() != m_workUnit)
 		return;
 
+	if (m_stats.m_gstdCompressedSize == 0)
+	{
+		int n = 0;
+	}
+
 	size_t currentPageSize = ComputeCurrentPageSize();
 	const unsigned char *compressedData = m_transcodedData;
 	size_t compressedSize = m_transcodedSize;
@@ -824,7 +890,10 @@ void CompressionTask::FinishWritingWorkUnit()
 
 	uint32_t crc = crc32(0, m_inputData, currentPageSize);
 
-	m_cglobal->WriteToOutput(compressedData, crc, compressedSize, currentPageSize);
+	if (m_cglobal->IsStatsMode())
+		m_cglobal->WriteStatsToOutput(m_stats.m_filePos, m_stats.m_uncompressedSize, m_stats.m_zstdCompressedSize, m_stats.m_gstdCompressedSize, m_stats.m_gdeflateCompressedSize);
+	else
+		m_cglobal->WriteToOutput(compressedData, crc, compressedSize, currentPageSize);
 }
 
 size_t CompressionTask::ComputeCurrentPageSize() const
@@ -891,10 +960,11 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	unsigned int numThreads = maxThreads;
 	unsigned int isolateBlock = 0;
 	unsigned int pageSize = 64 * 1024;
-	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
+	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_maxCLevel());
 	const char* failBlockPath = "";
 	bool isolateMode = 0;
 	uint32_t tweaks = 0;
+	bool statsMode = false;
 
 	for (int i = 0; i < optc; i++)
 	{
@@ -951,6 +1021,10 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 		{
 			tweaks |= GSTD_TWEAK_NO_FSE_TABLE_SHUFFLE;
 		}
+		else if (!strcmp(optName, "-stats"))
+		{
+			statsMode = true;
+		}
 		else
 		{
 			fprintf(stderr, "Invalid option %s", optName);
@@ -1001,21 +1075,24 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 		return -1;
 	}
 
-	uint8_t pageSizeBytes[4];
-	pageSizeBytes[0] = static_cast<uint8_t>((pageSize >> 0) & 0xffu);
-	pageSizeBytes[1] = static_cast<uint8_t>((pageSize >> 8) & 0xffu);
-	pageSizeBytes[2] = static_cast<uint8_t>((pageSize >> 16) & 0xffu);
-	pageSizeBytes[3] = static_cast<uint8_t>((pageSize >> 24) & 0xffu);
-
-	if (fwrite(pageSizeBytes, 1, 4, outF) != 4)
+	if (!statsMode)
 	{
-		fprintf(stderr, "Failed to write page size");
-		return -1;
+		uint8_t pageSizeBytes[4];
+		pageSizeBytes[0] = static_cast<uint8_t>((pageSize >> 0) & 0xffu);
+		pageSizeBytes[1] = static_cast<uint8_t>((pageSize >> 8) & 0xffu);
+		pageSizeBytes[2] = static_cast<uint8_t>((pageSize >> 16) & 0xffu);
+		pageSizeBytes[3] = static_cast<uint8_t>((pageSize >> 24) & 0xffu);
+
+		if (fwrite(pageSizeBytes, 1, 4, outF) != 4)
+		{
+			fprintf(stderr, "Failed to write page size");
+			return -1;
+		}
 	}
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock, statsMode);
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 
