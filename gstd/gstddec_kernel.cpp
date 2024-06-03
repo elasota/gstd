@@ -20,13 +20,7 @@ the included LICENSE.txt file.
 #define GSTDDEC_LIT_BUFFER_BYTE_SIZE (GSTDDEC_FORMAT_WIDTH * 4)
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecompressRawBlock(vuint32_t laneIndex, uint32_t controlWord)
-{
-	GSTDDEC_WARN("NOT YET IMPLEMENTED");
-}
-
-GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecompressRLEBlock(vuint32_t laneIndex, uint32_t controlWord)
+void GSTDDEC_FUNCTION_CONTEXT DecompressRLEBlock(uint32_t controlWord)
 {
 	GSTDDEC_WARN("NOT YET IMPLEMENTED");
 }
@@ -548,7 +542,16 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeAndExecuteSequences(uint32_t litSectionType,
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uint32_t controlWord)
+void GSTDDEC_FUNCTION_CONTEXT DecompressRawBlock(uint32_t controlWord)
+{
+	uint32_t decompressedSize = (controlWord >> GSTD_CONTROL_DECOMPRESSED_SIZE_OFFSET) & GSTD_CONTROL_DECOMPRESSED_SIZE_MASK;
+	uint32_t auxByte = (controlWord >> GSTD_CONTROL_RAW_FIRST_BYTE_OFFSET) & GSTD_CONTROL_RAW_FIRST_BYTE_MASK;
+
+	GSTDDEC_WARN("NOT YET IMPLEMENTED");
+}
+
+GSTDDEC_FUNCTION_PREFIX
+void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(uint32_t controlWord)
 {
 	uint32_t litSectionType = ((controlWord >> GSTD_CONTROL_LIT_SECTION_TYPE_OFFSET) & GSTD_CONTROL_LIT_SECTION_TYPE_MASK);
 	uint32_t litLengthsMode = ((controlWord >> GSTD_CONTROL_LIT_LENGTH_MODE_OFFSET) & GSTD_CONTROL_LIT_LENGTH_MODE_MASK);
@@ -569,7 +572,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecompressCompressedBlock(vuint32_t laneIndex, uin
 	if (litSectionType == GSTD_LITERALS_SECTION_TYPE_HUFFMAN)
 	{
 		uint32_t finalWeightTotal = 0;
-		DecodeLitHuffmanTree(laneIndex, auxBit, finalWeightTotal);
+		DecodeLitHuffmanTree(auxBit, finalWeightTotal);
 		huffmanCodeMask = finalWeightTotal - 1;
 	}
 	else
@@ -1166,7 +1169,7 @@ void GSTDDEC_FUNCTION_CONTEXT ExpandLitHuffmanTable(uint32_t numSpecifiedWeights
 }
 
 GSTDDEC_FUNCTION_PREFIX
-void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t auxBit, GSTDDEC_PARAM_OUT(uint32_t, outWeightTotal))
+void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(uint32_t auxBit, GSTDDEC_PARAM_OUT(uint32_t, outWeightTotal))
 {
 	uint32_t weightTotal = 0;
 
@@ -1189,7 +1192,7 @@ void GSTDDEC_FUNCTION_CONTEXT DecodeLitHuffmanTree(vuint32_t laneIndex, uint32_t
 
 		for (uint32_t firstWeight = 0; firstWeight < numSpecifiedWeights; firstWeight += GSTDDEC_VECTOR_WIDTH)
 		{
-			vuint32_t weightIndex = GSTDDEC_VECTOR_UINT32(firstWeight) + laneIndex;
+			vuint32_t weightIndex = GSTDDEC_VECTOR_UINT32(firstWeight) + GSTDDEC_LANE_INDEX;
 			vuint32_t weight = GSTDDEC_VECTOR_UINT32(0);
 
 			GSTDDEC_VECTOR_IF(weightIndex < GSTDDEC_VECTOR_UINT32(numSpecifiedWeights))
@@ -1959,16 +1962,16 @@ void GSTDDEC_FUNCTION_CONTEXT Run(vuint32_t laneIndex)
 
 		if (blockType == GSTD_BLOCK_TYPE_COMPRESSED)
 		{
-			DecompressCompressedBlock(laneIndex, controlWord);
+			DecompressCompressedBlock(controlWord);
 		}
 		else if (blockType == GSTD_BLOCK_TYPE_RLE)
 		{
+			DecompressRLEBlock(controlWord);
 			GSTDDEC_WARN("NOT YET IMPLEMENTED");
 		}
 		else if (blockType == GSTD_BLOCK_TYPE_RAW)
 		{
-			//DecompressRawBlock(decompressedSize);
-			GSTDDEC_WARN("NOT YET IMPLEMENTED");
+			DecompressRawBlock(controlWord);
 		}
 		else
 		{
