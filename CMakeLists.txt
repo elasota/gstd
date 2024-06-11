@@ -31,12 +31,25 @@ add_library(zstd STATIC
 	modules/zstd/lib/decompress/zstd_decompress_block.c
 	)
 
+add_library(libdeflate STATIC
+	modules/libdeflate/lib/deflate_compress.c
+	modules/libdeflate/lib/utils.c
+	)
+
+target_include_directories(libdeflate PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/libdeflate>
+	)
+
 add_executable(gstdcmd
 	gstd/gstd.cpp
 	gstd/gstddec_kernel.cpp
 	gstd/crc32.c
 	)
-	
+
+add_executable(zstdasm
+	modules/zstdhl/zstdasm.c
+	)
+
 add_subdirectory(modules/zstdhl)
 
 target_include_directories(gstdcmd PRIVATE
@@ -44,4 +57,5 @@ target_include_directories(gstdcmd PRIVATE
 	$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/modules/zstdhl>
 	)
 
-target_link_libraries(gstdcmd zstdhl zstd)
+target_link_libraries(gstdcmd zstdhl zstd libdeflate)
+target_link_libraries(zstdasm zstdhl)

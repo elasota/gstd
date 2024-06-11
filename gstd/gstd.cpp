@@ -7,9 +7,11 @@ the included LICENSE.txt file.
 */
 
 #define _CRT_SECURE_NO_WARNINGS
+#define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstdhl.h"
 #include "gstdenc.h"
+#include "libdeflate.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -541,11 +543,13 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool useZStd, bool useDeflate);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
 
+	bool IsUsingZStd() const;
+	bool IsUsingDeflate() const;
 	size_t NumPages() const;
 	size_t PageSize() const;
 	size_t GlobalSize() const;
@@ -574,12 +578,15 @@ private:
 
 	bool m_isIsolateBlock;
 	unsigned int m_isolateBlock;
+
+	bool m_useZStd;
+	bool m_useDeflate;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool useZStd, bool useDeflate)
 	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize)
 	, m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
-	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock)
+	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock), m_useZStd(useZStd), m_useDeflate(useDeflate)
 {
 }
 
@@ -613,6 +620,15 @@ void CompressionGlobal::WriteToOutput(const void *src, uint32_t crc, size_t comp
 	fwrite(src, 1, compressedSize, m_outF);
 }
 
+bool CompressionGlobal::IsUsingZStd() const
+{
+	return m_useZStd;
+}
+
+bool CompressionGlobal::IsUsingDeflate() const
+{
+	return m_useDeflate;
+}
 
 size_t CompressionGlobal::NumPages() const
 {
@@ -666,27 +682,54 @@ public:
 	void FinishWritingWorkUnit() override;
 
 private:
+	struct CompressionOutputBuffer
+	{
+		CompressionOutputBuffer() : m_data(nullptr), m_size(0), m_capacity(0) {}
+
+		unsigned char *m_data;
+		size_t m_size;
+		size_t m_capacity;
+	};
+
+	struct CompressionInputBuffer
+	{
+		CompressionInputBuffer() : m_data(nullptr), m_readPos(0), m_size(0) {}
+
+		const unsigned char *m_data;
+		size_t m_readPos;
+		size_t m_size;
+	};
+
 	size_t ComputeCurrentPageSize() const;
 
 	size_t m_workUnit;
 	size_t m_compressedSize;
+	size_t m_deflatedSize;
 	size_t m_maxCompressedSize;
+	size_t m_maxDeflatedData;
 	CompressionGlobal *m_cglobal;
 	unsigned char *m_inputData;
 	unsigned char *m_compressedData;
+	unsigned char *m_deflatedData;
 	ZSTD_CCtx *m_ctx;
+	libdeflate_compressor *m_libdeflateCompressor;
 
-	unsigned char *m_transcodedData;
-	size_t m_transcodedSize;
-	size_t m_transcodedCapacity;
+	CompressionOutputBuffer m_transcodeOutput;
+	CompressionOutputBuffer m_deflateConvOutput;
 
 	zstdhl_EncoderOutputObject_t m_encoderOutputObj;
+	zstdhl_EncoderOutputObject_t m_deflateConvOutputObj;
 	zstdhl_MemoryAllocatorObject_t m_memAlloc;
 	gstd_EncoderState_t *m_encState;
-	zstdhl_StreamSourceObject_t m_streamSource;
+	zstdhl_StreamSourceObject_t m_transcodeStreamSource;
+	zstdhl_StreamSourceObject_t m_deflateConvStreamSource;
 
-	size_t m_transcodeReadPos;
+	CompressionInputBuffer m_transcodeInput;
+	CompressionInputBuffer m_deflateConvInput;
+
 	size_t m_numLanes;
+
+	size_t m_deflateReadPos;
 
 	static void *CBRealloc(void *userdata, void *ptr, size_t newSize);
 	static zstdhl_ResultCode_t CBWriteBitstream(void *userdata, const void *data, size_t size);
@@ -695,32 +738,39 @@ private:
 
 CompressionTask::CompressionTask()
 	: m_workUnit(0), m_cglobal(nullptr), m_inputData(nullptr), m_compressedData(nullptr), m_compressedSize(0), m_ctx(nullptr),
-	m_transcodedData(nullptr), m_transcodedSize(0), m_transcodedCapacity(0), m_transcodeReadPos(0), m_encState(nullptr),
-	m_maxCompressedSize(0)
+	m_encState(nullptr), m_maxCompressedSize(0), m_deflatedSize(0), m_maxDeflatedData(0)
 {
 	m_numLanes = 32;
 
 	m_encoderOutputObj.m_userdata = nullptr;
 	m_encoderOutputObj.m_writeBitstreamFunc = nullptr;
 
+	m_deflateConvOutputObj.m_userdata = nullptr;
+	m_deflateConvOutputObj.m_writeBitstreamFunc = nullptr;
+
 	m_memAlloc.m_userdata = nullptr;
 	m_memAlloc.m_reallocFunc = nullptr;
 
-	m_streamSource.m_readBytesFunc = nullptr;
-	m_streamSource.m_userdata = nullptr;
+	m_transcodeStreamSource.m_readBytesFunc = nullptr;
+	m_transcodeStreamSource.m_userdata = nullptr;
 }
 
 CompressionTask::~CompressionTask()
 {
 	delete[] m_inputData;
 	delete[] m_compressedData;
-	delete[] m_transcodedData;
+	delete[] m_transcodeOutput.m_data;
+	delete[] m_deflateConvOutput.m_data;
+	delete[] m_deflatedData;
 
 	if (m_ctx)
 		ZSTD_freeCCtx(m_ctx);
 
 	if (m_encState)
 		gstd_Encoder_Destroy(m_encState);
+
+	if (m_libdeflateCompressor)
+		libdeflate_free_compressor(m_libdeflateCompressor);
 }
 
 void CompressionTask::Init(CompressionGlobal *cglobal)
@@ -732,15 +782,24 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 	m_compressedData = new unsigned char[m_maxCompressedSize];
 
 	m_ctx = ZSTD_createCCtx();
+	m_libdeflateCompressor = libdeflate_alloc_compressor(12);
+	m_maxDeflatedData = libdeflate_deflate_compress_bound(m_libdeflateCompressor, cglobal->PageSize());
+	m_deflatedData = new unsigned char[m_maxDeflatedData];
 
 	m_memAlloc.m_userdata = this;
 	m_memAlloc.m_reallocFunc = CBRealloc;
 
-	m_encoderOutputObj.m_userdata = this;
+	m_encoderOutputObj.m_userdata = &m_transcodeOutput;
 	m_encoderOutputObj.m_writeBitstreamFunc = CBWriteBitstream;
 
-	m_streamSource.m_userdata = this;
-	m_streamSource.m_readBytesFunc = CBReadBytes;
+	m_deflateConvOutputObj.m_userdata = &m_deflateConvOutput;
+	m_deflateConvOutputObj.m_writeBitstreamFunc = CBWriteBitstream;
+
+	m_transcodeStreamSource.m_userdata = &m_transcodeInput;
+	m_transcodeStreamSource.m_readBytesFunc = CBReadBytes;
+
+	m_deflateConvStreamSource.m_userdata = &m_deflateConvInput;
+	m_deflateConvStreamSource.m_readBytesFunc = CBReadBytes;
 
 	gstd_Encoder_Create(&m_encoderOutputObj, m_numLanes, gstd_ComputeMaxOffsetExtraBits(static_cast<uint32_t>(cglobal->PageSize())), m_cglobal->Tweaks(), &m_memAlloc, &m_encState);	// TODO: Error check
 }
@@ -756,19 +815,90 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 
 	m_cglobal->ReadFromInput(m_inputData, workUnit * m_cglobal->PageSize(), currentPageSize);
 
-	unsigned int clevel = std::min(m_cglobal->CompressionLevel(), static_cast<unsigned int>(ZSTD_maxCLevel()));
+ 	if (m_cglobal->IsUsingZStd())
+	{
+		unsigned int clevel = std::min(m_cglobal->CompressionLevel(), static_cast<unsigned int>(ZSTD_maxCLevel()));
 
-	ZSTD_CCtx_setPledgedSrcSize(m_ctx, currentPageSize);
-	ZSTD_CCtx_setParameter(m_ctx, ZSTD_cParameter::ZSTD_c_compressionLevel, static_cast<int>(clevel));
+		ZSTD_CCtx_setPledgedSrcSize(m_ctx, currentPageSize);
+		ZSTD_CCtx_setParameter(m_ctx, ZSTD_c_compressionLevel, static_cast<int>(clevel));
+		//ZSTD_CCtx_setParameter(m_ctx, ZSTD_c_useBlockSplitter, static_cast<int>(ZSTD_ps_enable));
 
-	m_compressedSize = ZSTD_compress2(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize);
+		m_compressedSize = ZSTD_compress2(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize);
 
-	ZSTD_CCtx_reset(m_ctx, ZSTD_reset_session_and_parameters);
+		ZSTD_CCtx_reset(m_ctx, ZSTD_reset_session_and_parameters);
+	}
+	else
+		m_compressedSize = 0;
 
-	m_transcodeReadPos = 0;
-	m_transcodedSize = 0;
+	m_transcodeInput.m_readPos = 0;
+	m_transcodeInput.m_size = m_compressedSize;
+	m_transcodeInput.m_data = m_compressedData;
 
-	zstdhl_ResultCode_t transcodeResult = gstd_Encoder_Transcode(m_encState, &m_streamSource, &m_memAlloc);
+	if (m_cglobal->IsUsingDeflate())
+	{
+		m_deflatedSize = libdeflate_deflate_compress(m_libdeflateCompressor, m_inputData, currentPageSize, m_deflatedData, m_maxDeflatedData);
+
+		zstdhl_DeflateConv_State_t *deflateConvState = nullptr;
+		zstdhl_EncBlockDesc_t convEncBlock;
+		zstdhl_FrameHeaderDesc_t frameHeaderDesc;
+
+		m_deflateConvOutput.m_size = 0;
+
+		m_deflateConvStreamSource.m_readBytesFunc = CBReadBytes;
+		m_deflateConvStreamSource.m_userdata = &m_deflateConvInput;
+
+		m_deflateConvInput.m_size = m_deflatedSize;
+		m_deflateConvInput.m_readPos = 0;
+		m_deflateConvInput.m_data = m_deflatedData;
+
+		zstdhl_DeflateConv_CreateState(&m_memAlloc, &m_deflateConvStreamSource, &deflateConvState);
+
+		zstdhl_ResultCode_t convResult = ZSTDHL_RESULT_OK;
+		uint8_t eofFlag = 0;
+
+		frameHeaderDesc.m_dictionaryID = 0;
+		frameHeaderDesc.m_frameContentSize = 0;
+		frameHeaderDesc.m_windowSize = 32768;
+		frameHeaderDesc.m_haveContentChecksum = 0;
+		frameHeaderDesc.m_haveDictionaryID = 0;
+		frameHeaderDesc.m_haveFrameContentSize = 0;
+		frameHeaderDesc.m_haveWindowSize = 1;
+		frameHeaderDesc.m_isSingleSegment = 0;
+
+		zstdhl_AssemblerPersistentState_t persistentState;
+
+		zstdhl_InitAssemblerState(&persistentState);
+
+		convResult = zstdhl_AssembleFrame(&frameHeaderDesc, &m_deflateConvOutputObj, 0);
+
+		while (convResult == ZSTDHL_RESULT_OK && !eofFlag)
+		{
+			size_t deflateReadStart = m_deflateConvInput.m_readPos;
+			size_t zstdWriteStart = m_deflateConvOutput.m_size;
+
+			convResult = zstdhl_DeflateConv_Convert(deflateConvState, &eofFlag, &convEncBlock);
+
+			if (eofFlag)
+				break;
+
+			if (convResult == ZSTDHL_RESULT_OK)
+			{
+				convResult = zstdhl_AssembleBlock(&persistentState, &convEncBlock, &m_deflateConvOutputObj, &m_memAlloc);
+			}
+		}
+
+		zstdhl_DeflateConv_DestroyState(deflateConvState);
+
+		if (m_deflatedSize > 0 && convResult == ZSTDHL_RESULT_OK)
+		{
+			unsigned char *convertedData = m_deflateConvOutput.m_data;
+			size_t convertedSize = m_deflateConvOutput.m_size;
+		}
+	}
+
+	m_transcodeOutput.m_size = 0;
+
+	zstdhl_ResultCode_t transcodeResult = gstd_Encoder_Transcode(m_encState, &m_transcodeStreamSource, &m_memAlloc);
 
 	if (transcodeResult != ZSTDHL_RESULT_OK)
 	{
@@ -781,7 +911,7 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 				pathBase.append("/");
 
 			fprintf(stderr, "Failed with result code %i in block %zu\n", static_cast<int>(transcodeResult), m_workUnit);
-			m_transcodedSize = 0;
+			m_transcodeOutput.m_size = 0;
 
 			char debugPath[128];
 			sprintf_s(debugPath, "fail_block_%zu.bin", m_workUnit);
@@ -813,8 +943,8 @@ void CompressionTask::FinishWritingWorkUnit()
 		return;
 
 	size_t currentPageSize = ComputeCurrentPageSize();
-	const unsigned char *compressedData = m_transcodedData;
-	size_t compressedSize = m_transcodedSize;
+	const unsigned char *compressedData = m_transcodeOutput.m_data;
+	size_t compressedSize = m_transcodeOutput.m_size;
 
 	if (compressedSize >= currentPageSize)
 	{
@@ -850,37 +980,37 @@ void *CompressionTask::CBRealloc(void *userdata, void *ptr, size_t newSize)
 
 zstdhl_ResultCode_t CompressionTask::CBWriteBitstream(void *userdata, const void *data, size_t size)
 {
-	CompressionTask *self = static_cast<CompressionTask *>(userdata);
+	CompressionOutputBuffer *outBuf = static_cast<CompressionOutputBuffer *>(userdata);
 
-	size_t oldCapacity = self->m_transcodedCapacity;
-	while (self->m_transcodedCapacity < self->m_transcodedSize + size)
-		self->m_transcodedCapacity = std::max<size_t>(1024, self->m_transcodedCapacity * 2);
+	size_t oldCapacity = outBuf->m_capacity;
+	while (outBuf->m_capacity < outBuf->m_size + size)
+		outBuf->m_capacity = std::max<size_t>(1024, outBuf->m_capacity * 2);
 
-	if (oldCapacity != self->m_transcodedCapacity)
+	if (oldCapacity != outBuf->m_capacity)
 	{
-		unsigned char *newData = new unsigned char[self->m_transcodedCapacity];
-		memcpy(newData, self->m_transcodedData, self->m_transcodedSize);
-		delete[] self->m_transcodedData;
+		unsigned char *newData = new unsigned char[outBuf->m_capacity];
+		memcpy(newData, outBuf->m_data, outBuf->m_size);
+		delete[] outBuf->m_data;
 
-		self->m_transcodedData = newData;
+		outBuf->m_data = newData;
 	}
 
-	memcpy(self->m_transcodedData + self->m_transcodedSize, data, size);
-	self->m_transcodedSize += size;
+	memcpy(outBuf->m_data + outBuf->m_size, data, size);
+	outBuf->m_size += size;
 
 	return ZSTDHL_RESULT_OK;
 }
 
 size_t CompressionTask::CBReadBytes(void *userdata, void *dest, size_t size)
 {
-	CompressionTask *self = static_cast<CompressionTask *>(userdata);
+	CompressionInputBuffer *inBuf = static_cast<CompressionInputBuffer *>(userdata);
 
-	size_t available = self->m_compressedSize - self->m_transcodeReadPos;
+	size_t available = inBuf->m_size - inBuf->m_readPos;
 	if (size > available)
 		size = available;
 
-	memcpy(dest, self->m_compressedData + self->m_transcodeReadPos, size);
-	self->m_transcodeReadPos += size;
+	memcpy(dest, inBuf->m_data + inBuf->m_readPos, size);
+	inBuf->m_readPos += size;
 
 	return size;
 }
@@ -895,6 +1025,8 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	const char* failBlockPath = "";
 	bool isolateMode = 0;
 	uint32_t tweaks = 0;
+	bool useZStd = true;
+	bool useDeflate = true;
 
 	for (int i = 0; i < optc; i++)
 	{
@@ -1015,7 +1147,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock, useZStd, useDeflate);
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 

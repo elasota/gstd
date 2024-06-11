@@ -6,3 +6,7 @@
 	path = modules/zstd
 	url = https://github.com/facebook/zstd
 	branch = dev
+[submodule "modules/libdeflate"]
+	path = modules/libdeflate
+	url = https://github.com/ebiggers/libdeflate.git
+	branch = master
