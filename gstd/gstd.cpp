@@ -753,6 +753,9 @@ CompressionTask::CompressionTask()
 
 	m_transcodeStreamSource.m_readBytesFunc = nullptr;
 	m_transcodeStreamSource.m_userdata = nullptr;
+
+	m_deflateConvStreamSource.m_readBytesFunc = nullptr;
+	m_deflateConvStreamSource.m_userdata = nullptr;
 }
 
 CompressionTask::~CompressionTask()
@@ -783,8 +786,17 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 
 	m_ctx = ZSTD_createCCtx();
 	m_libdeflateCompressor = libdeflate_alloc_compressor(12);
-	m_maxDeflatedData = libdeflate_deflate_compress_bound(m_libdeflateCompressor, cglobal->PageSize());
-	m_deflatedData = new unsigned char[m_maxDeflatedData];
+
+	if (m_cglobal->IsUsingDeflate())
+	{
+		m_maxDeflatedData = libdeflate_deflate_compress_bound(m_libdeflateCompressor, cglobal->PageSize());
+		m_deflatedData = new unsigned char[m_maxDeflatedData];
+	}
+	else
+	{
+		m_maxDeflatedData = 0;
+		m_deflatedData = nullptr;
+	}
 
 	m_memAlloc.m_userdata = this;
 	m_memAlloc.m_reallocFunc = CBRealloc;
@@ -831,6 +843,7 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 		m_compressedSize = 0;
 
 	m_transcodeInput.m_readPos = 0;
+
 	m_transcodeInput.m_size = m_compressedSize;
 	m_transcodeInput.m_data = m_compressedData;
 
@@ -893,6 +906,12 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 		{
 			unsigned char *convertedData = m_deflateConvOutput.m_data;
 			size_t convertedSize = m_deflateConvOutput.m_size;
+
+			if (m_transcodeInput.m_size == 0 || m_deflateConvOutput.m_size < m_transcodeInput.m_size)
+			{
+				m_transcodeInput.m_size = m_deflateConvOutput.m_size;
+				m_transcodeInput.m_data = m_deflateConvOutput.m_data;
+			}
 		}
 	}
 
