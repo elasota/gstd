@@ -10,6 +10,7 @@ the included LICENSE.txt file.
 #define ZSTD_STATIC_LINKING_ONLY
 #include "zstd.h"
 #include "zstdhl.h"
+#include "zdict.h"
 #include "gstdenc.h"
 #include "libdeflate.h"
 
@@ -540,10 +541,179 @@ int DecompressMain(int optc, const char **optv, const char *inFileName, const ch
 	return 0;
 }
 
+
+int TrainMain(int optc, const char **optv, const char *inFileName, const char *outFileName)
+{
+	unsigned int maxThreads = std::thread::hardware_concurrency();
+	unsigned int numThreads = maxThreads;
+	unsigned int isolateBlock = 0;
+	unsigned int pageSize = 64 * 1024;
+	unsigned int prefixSize = 4 * 1024;
+	unsigned int dictSize = 16 * 1024;
+	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
+	bool isolateMode = 0;
+	uint32_t tweaks = 0;
+	bool useZStd = true;
+	bool useDeflate = true;
+
+	std::vector<uint8_t> dataChunks;
+	std::vector<size_t> sizes;
+
+	for (int i = 0; i < optc; i++)
+	{
+		const char *optName = optv[i];
+		if (!strcmp(optName, "-pagesize"))
+		{
+			i++;
+			if (i == optc || !sscanf(optv[i], "%u", &pageSize) || pageSize < 1024)
+			{
+				fprintf(stderr, "Invalid page size parameter for -pagesize");
+				return -1;
+			}
+		}
+		else if (!strcmp(optName, "-prefixsize"))
+		{
+			i++;
+			if (i == optc || !sscanf(optv[i], "%u", &prefixSize) || prefixSize < 64)
+			{
+				fprintf(stderr, "Invalid page size parameter for -prefixsize");
+				return -1;
+			}
+		}
+		else if (!strcmp(optName, "-dictsize"))
+		{
+			i++;
+			if (i == optc || !sscanf(optv[i], "%u", &dictSize) || dictSize < 1024)
+			{
+				fprintf(stderr, "Invalid page size parameter for -dictsize");
+				return -1;
+			}
+		}
+		else if (!strcmp(optName, "-level"))
+		{
+			i++;
+			if (i == optc || !sscanf(optv[i], "%u", &compressionLevel))
+			{
+				fprintf(stderr, "Invalid level for -level");
+				return -1;
+			}
+		}
+		else
+		{
+			fprintf(stderr, "Invalid option %s", optName);
+			return -1;
+		}
+	}
+
+	if (numThreads > maxThreads)
+		numThreads = maxThreads;
+	else if (numThreads < 1)
+		numThreads = 1;
+
+	if (prefixSize > pageSize)
+	{
+		fprintf(stderr, "Prefix size is larger than page size");
+		return -1;
+	}
+
+	FILE *inF = fopen(inFileName, "rb");
+	if (!inF)
+	{
+		fprintf(stderr, "Couldn't open input file %s", inFileName);
+		return -1;
+	}
+
+	if (fseek(inF, 0, SEEK_END))
+	{
+		fprintf(stderr, "Failed to seek to end of input file");
+		return -1;
+	}
+
+	long fileSizeL = ftell(inF);
+	if (fileSizeL < 0 || fileSizeL > std::numeric_limits<size_t>::max())
+	{
+		fprintf(stderr, "Integer overflow");
+		return -1;
+	}
+
+	if (fseek(inF, 0, SEEK_SET))
+	{
+		fprintf(stderr, "Failed to seek to start of input file");
+		return -1;
+	}
+
+	size_t fileSize = static_cast<size_t>(fileSizeL);
+	size_t numPages = fileSize / pageSize;
+
+	if (fileSize % pageSize)
+		numPages++;
+
+	size_t lastPrefixSize = std::min<size_t>(prefixSize, fileSize - (numPages - 1u) * pageSize);
+
+	dataChunks.resize(prefixSize * (numPages - 1u) + lastPrefixSize);
+
+	sizes.reserve(numPages);
+
+	for (size_t pageIndex = 0; pageIndex < numPages; pageIndex++)
+	{
+		size_t thisPagePrefixSize = prefixSize;
+		bool isLastPage = (pageIndex + 1u == numPages);
+
+		if (isLastPage)
+			thisPagePrefixSize = lastPrefixSize;
+
+		if (fread(&dataChunks[pageIndex * prefixSize], 1, thisPagePrefixSize, inF) != thisPagePrefixSize)
+		{
+			fprintf(stderr, "Prefix read failed for page %zu", pageIndex);
+			return -1;
+		}
+
+		if (!isLastPage && fseek(inF, static_cast<long>(pageSize - thisPagePrefixSize), SEEK_CUR))
+		{
+			fprintf(stderr, "Prefix skip failed for page %zu", pageIndex);
+			return -1;
+		}
+
+		sizes.push_back(thisPagePrefixSize);
+	}
+
+	std::vector<uint8_t> dictBuffer;
+
+	dictBuffer.resize(dictSize);
+
+	{
+		size_t dictSize = ZDICT_trainFromBuffer(&dictBuffer[0], dictBuffer.size(), &dataChunks[0], &sizes[0], static_cast<unsigned int>(sizes.size()));
+		if (ZDICT_isError(dictSize))
+		{
+			fprintf(stderr, "Training failed with error code %zu", dictSize);
+			return -1;
+		}
+
+		dictBuffer.resize(dictSize);
+	}
+
+	FILE *outF = fopen(outFileName, "wb");
+	if (!outF)
+	{
+		fprintf(stderr, "Couldn't open output file %s", outFileName);
+		return -1;
+	}
+
+	fwrite(&dictBuffer[0], 1, dictBuffer.size(), outF);
+
+	fclose(inF);
+	fclose(outF);
+
+	return 0;
+}
+
 class CompressionGlobal
 {
 public:
-	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool useZStd, bool useDeflate);
+	CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize,
+		unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate,
+		unsigned int isolateBlock, bool useZStd, bool useDeflate,
+		ZSTD_CDict *dict, const void *dictData, size_t dictSize);
 
 	void ReadFromInput(void *dest, size_t offset, size_t size);
 	void WriteToOutput(const void *src, uint32_t crc, size_t compressedSize, size_t uncompressedSize);
@@ -558,6 +728,9 @@ public:
 	const char* FailBlockPath() const;
 	bool IsIsolateBlock() const;
 	unsigned int IsolateBlock() const;
+	ZSTD_CDict *ZStdDict() const;
+	const void *ZStdDictData() const;
+	size_t ZStdDictSize() const;
 
 private:
 	std::mutex m_inFileMutex;
@@ -581,12 +754,20 @@ private:
 
 	bool m_useZStd;
 	bool m_useDeflate;
+
+	ZSTD_CDict *m_dict;
+	const void *m_dictData;
+	size_t m_dictSize;
 };
 
-CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages, size_t pageSize, size_t globalSize, unsigned int compressionLevel, uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool useZStd, bool useDeflate)
+CompressionGlobal::CompressionGlobal(FILE *inF, FILE *outF, size_t numPages,
+	size_t pageSize, size_t globalSize, unsigned int compressionLevel,
+	uint32_t tweaks, const char *failBlockPath, bool isIsolate, unsigned int isolateBlock, bool useZStd, bool useDeflate,
+	ZSTD_CDict *dict, const void *dictData, size_t dictSize)
 	: m_inF(inF), m_outF(outF), m_numPages(numPages), m_pageSize(pageSize), m_globalSize(globalSize)
 	, m_compressionLevel(compressionLevel), m_tweaks(tweaks), m_failBlockPath(failBlockPath)
 	, m_isIsolateBlock(isIsolate), m_isolateBlock(isolateBlock), m_useZStd(useZStd), m_useDeflate(useDeflate)
+	, m_dict(dict), m_dictData(dictData), m_dictSize(dictSize)
 {
 }
 
@@ -670,6 +851,21 @@ unsigned int CompressionGlobal::IsolateBlock() const
 	return m_isolateBlock;
 }
 
+ZSTD_CDict *CompressionGlobal::ZStdDict() const
+{
+	return m_dict;
+}
+
+const void *CompressionGlobal::ZStdDictData() const
+{
+	return m_dictData;
+}
+
+size_t CompressionGlobal::ZStdDictSize() const
+{
+	return m_dictSize;
+}
+
 class CompressionTask : public ThreadedTaskBase
 {
 public:
@@ -721,9 +917,11 @@ private:
 	zstdhl_EncoderOutputObject_t m_deflateConvOutputObj;
 	zstdhl_MemoryAllocatorObject_t m_memAlloc;
 	gstd_EncoderState_t *m_encState;
+	zstdhl_StreamSourceObject_t m_dictStreamSource;
 	zstdhl_StreamSourceObject_t m_transcodeStreamSource;
 	zstdhl_StreamSourceObject_t m_deflateConvStreamSource;
 
+	CompressionInputBuffer m_dictInput;
 	CompressionInputBuffer m_transcodeInput;
 	CompressionInputBuffer m_deflateConvInput;
 
@@ -753,6 +951,9 @@ CompressionTask::CompressionTask()
 
 	m_transcodeStreamSource.m_readBytesFunc = nullptr;
 	m_transcodeStreamSource.m_userdata = nullptr;
+
+	m_dictStreamSource.m_readBytesFunc = nullptr;
+	m_dictStreamSource.m_userdata = nullptr;
 
 	m_deflateConvStreamSource.m_readBytesFunc = nullptr;
 	m_deflateConvStreamSource.m_userdata = nullptr;
@@ -810,6 +1011,9 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 	m_transcodeStreamSource.m_userdata = &m_transcodeInput;
 	m_transcodeStreamSource.m_readBytesFunc = CBReadBytes;
 
+	m_dictStreamSource.m_userdata = &m_dictInput;
+	m_dictStreamSource.m_readBytesFunc = CBReadBytes;
+
 	m_deflateConvStreamSource.m_userdata = &m_deflateConvInput;
 	m_deflateConvStreamSource.m_readBytesFunc = CBReadBytes;
 
@@ -818,6 +1022,8 @@ void CompressionTask::Init(CompressionGlobal *cglobal)
 
 void CompressionTask::RunWorkUnit(size_t workUnit)
 {
+	bool useDict = false;
+
 	m_workUnit = workUnit;
 
 	if (m_cglobal->IsIsolateBlock() && m_cglobal->IsolateBlock() != workUnit)
@@ -835,7 +1041,13 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 		ZSTD_CCtx_setParameter(m_ctx, ZSTD_c_compressionLevel, static_cast<int>(clevel));
 		//ZSTD_CCtx_setParameter(m_ctx, ZSTD_c_useBlockSplitter, static_cast<int>(ZSTD_ps_enable));
 
-		m_compressedSize = ZSTD_compress2(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize);
+		if (m_cglobal->ZStdDict())
+		{
+			m_compressedSize = ZSTD_compress_usingCDict(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize, m_cglobal->ZStdDict());
+			useDict = true;
+		}
+		else
+			m_compressedSize = ZSTD_compress2(m_ctx, m_compressedData, m_maxCompressedSize, m_inputData, currentPageSize);
 
 		ZSTD_CCtx_reset(m_ctx, ZSTD_reset_session_and_parameters);
 	}
@@ -843,9 +1055,13 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 		m_compressedSize = 0;
 
 	m_transcodeInput.m_readPos = 0;
+	m_dictInput.m_readPos = 0;
 
 	m_transcodeInput.m_size = m_compressedSize;
 	m_transcodeInput.m_data = m_compressedData;
+
+	m_dictInput.m_data = static_cast<const uint8_t *>(m_cglobal->ZStdDictData());
+	m_dictInput.m_size = m_cglobal->ZStdDictSize();
 
 	if (m_cglobal->IsUsingDeflate())
 	{
@@ -911,13 +1127,14 @@ void CompressionTask::RunWorkUnit(size_t workUnit)
 			{
 				m_transcodeInput.m_size = m_deflateConvOutput.m_size;
 				m_transcodeInput.m_data = m_deflateConvOutput.m_data;
+				useDict = false;
 			}
 		}
 	}
 
 	m_transcodeOutput.m_size = 0;
 
-	zstdhl_ResultCode_t transcodeResult = gstd_Encoder_Transcode(m_encState, &m_transcodeStreamSource, &m_memAlloc);
+	zstdhl_ResultCode_t transcodeResult = gstd_Encoder_Transcode(m_encState, &m_transcodeStreamSource, useDict ? (&m_dictStreamSource) : nullptr, &m_memAlloc);
 
 	if (transcodeResult != ZSTDHL_RESULT_OK)
 	{
@@ -1041,7 +1258,8 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	unsigned int isolateBlock = 0;
 	unsigned int pageSize = 64 * 1024;
 	unsigned int compressionLevel = static_cast<unsigned int>(ZSTD_defaultCLevel());
-	const char* failBlockPath = "";
+	const char *failBlockPath = "";
+	const char *dictPath = "";
 	bool isolateMode = 0;
 	uint32_t tweaks = 0;
 	bool useZStd = true;
@@ -1079,6 +1297,17 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 			failBlockPath = optv[i];
 		}
+		else if (!strcmp(optName, "-dict"))
+		{
+			i++;
+			if (i == optc)
+			{
+				fprintf(stderr, "Expected path for -dict");
+				return -1;
+			}
+
+			dictPath = optv[i];
+		}
 		else if (!strcmp(optName, "-level"))
 		{
 			i++;
@@ -1113,6 +1342,55 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 		numThreads = maxThreads;
 	else if (numThreads < 1)
 		numThreads = 1;
+
+	std::vector<uint8_t> dictData;
+
+	ZSTD_CDict *dict = nullptr;
+
+	if (dictPath[0])
+	{
+		FILE *dictF = fopen(dictPath, "rb");
+
+		if (fseek(dictF, 0, SEEK_END))
+		{
+			fprintf(stderr, "Dict seek failed");
+			return -1;
+		}
+
+		long dictSizeL = ftell(dictF);
+
+		if (static_cast<unsigned long>(dictSizeL) > std::numeric_limits<size_t>::max())
+		{
+			fprintf(stderr, "Dict too big");
+			return -1;
+		}
+
+		if (fseek(dictF, 0, SEEK_SET))
+		{
+			fprintf(stderr, "Dict seek to start failed");
+			return -1;
+		}
+
+		size_t dictSize = dictSizeL;
+
+		dictData.resize(dictSize);
+		if (fread(&dictData[0], 1, dictSize, dictF) != dictSize)
+		{
+			fprintf(stderr, "Dict read failed");
+			return -1;
+		}
+
+		fclose(dictF);
+
+		unsigned int realCompressionLevel = std::min<unsigned int>(compressionLevel, ZSTD_maxCLevel());
+
+		dict = ZSTD_createCDict_byReference(&dictData[0], dictSize, static_cast<int>(realCompressionLevel));
+		if (!dict)
+		{
+			fprintf(stderr, "Dict load failed");
+			return -1;
+		}
+	}
 
 	FILE *inF = fopen(inFileName, "rb");
 	if (!inF)
@@ -1166,7 +1444,7 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 
 	SerializedTaskGlobalState globalState(numPages, numThreads);
 
-	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock, useZStd, useDeflate);
+	CompressionGlobal cglobal(inF, outF, numPages, pageSize, fileSize, compressionLevel, tweaks, failBlockPath, isolateMode, isolateBlock, useZStd, useDeflate, dict, dict ? (&dictData[0]) : nullptr, dictData.size());
 
 	CompressionTask *tasks = new CompressionTask[numThreads];
 
@@ -1206,12 +1484,15 @@ int CompressMain(int optc, const char **optv, const char *inFileName, const char
 	fclose(inF);
 	fclose(outF);
 
+	if (dict)
+		ZSTD_freeCDict(dict);
+
 	return 0;
 }
 
-
 int ExportPredefinedTablesMain(int optc, const char **optv, const char *inFileName, const char *outFileName)
 {
+#if 0
 	FILE *f = fopen(outFileName, "wb");
 	if (!f)
 	{
@@ -1275,8 +1556,7 @@ int ExportPredefinedTablesMain(int optc, const char **optv, const char *inFileNa
 
 		for (int t = 0; t < 2; t++)
 		{
-
-			gstd_BuildFSEDistributionTable(&fseTable, &fseTableDef, t ? GSTD_TWEAK_NO_FSE_TABLE_SHUFFLE : 0);
+			gstd_BuildRANSTable(&fseTable, &fseTableDef, t ? GSTD_TWEAK_NO_FSE_TABLE_SHUFFLE : 0);
 
 			fprintf(f, "const uint32_t %s[%i] =\n", tabNames[i][t], numEntries);
 			fprintf(f, "{\n");
@@ -1297,6 +1577,7 @@ int ExportPredefinedTablesMain(int optc, const char **optv, const char *inFileNa
 	}
 	
 	fclose(f);
+#endif
 
 	return 0;
 }
@@ -1321,6 +1602,8 @@ int main(int argc, const char **argv)
 		return DecompressMain(numOptionArgs, firstOption, inFileName, outFileName);
 	if (!strcmp(argv[1], "p"))
 		return ExportPredefinedTablesMain(numOptionArgs, firstOption, inFileName, outFileName);
+	if (!strcmp(argv[1], "t"))
+		return TrainMain(numOptionArgs, firstOption, inFileName, outFileName);
 
 	PrintUsageAndQuit();
 	return -1;

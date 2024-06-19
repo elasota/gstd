@@ -47,10 +47,10 @@ process and the FIFO queues for each type of value are independent.
 
 The following rotating decode FIFO queues exist and are decoded independently:
 - Huffman weights
-- FSE table probabilities
-- Literal length FSE values
-- Match length FSE values
-- Offset FSE values
+- ANS table probabilities
+- Literal length ANS values
+- Match length ANS values
+- Offset ANS values
 - Literal length bits
 - Match length bits
 - Offset code bits
@@ -167,18 +167,18 @@ stream as the specified weight for each weight, then if the number of
 specified weights is odd, read an additional 4 bits as padding.
 
 
-FSE ENCODING OF HUFFMAN WEIGHTS
+ANS ENCODING OF HUFFMAN WEIGHTS
 
-For FSE encoding, first an FSE table is encoded.  The accuracy log is equal
-to (5 + Aux bit) and the maximum accuracy log is 6.  See the "FSE Table
+For ANS encoding, first an ANS table is encoded.  The accuracy log is equal
+to (5 + Aux bit) and the maximum accuracy log is 6.  See the "ANS Table
 Decoding" section for a description of the table.
 
 Huffman weights are decoding using rotating decode and the rotation resets
 at the start of each Huffman table definition.
 
 The process for decoding each weight is as follows:
-- Preload 9 bits
-- Decode one FSE value (see the "FSE Value Decoding" section)
+- Preload (ANS State Precision) bits
+- Decode one ANS value (see the "ANS Value Decoding" section)
 
   
 RLE ENCODING
@@ -196,9 +196,9 @@ RLE BLOCKS
 TODO
 
 
-FSE TABLE DECODING
+ANS TABLE DECODING
 
-FSE tables use a similar variable-size coding scheme to the one in Zstd with
+ANS tables use a similar variable-size coding scheme to the one in Zstd with
 a few differences.
 
 First, the special less-than-one probability is not supported.  Instead,
@@ -218,15 +218,18 @@ to a repeat count of 7.
 
 Probabilities are decoded using a rotating decode and the rotation resets at
 the start of each table definition.  The preload size in bits is equal to
-(4 + the maximum accuracy log).  Unlike most rotating decodes, FSE tables
+(4 + the maximum accuracy log).  Unlike most rotating decodes, ANS tables
 have no count known in advance, so all parallel bitstreams are preloaded
 during preload steps.
 
-FSE probability values are read in the following sequence:
+AND probability values are read in the following sequence:
 - Preload the rotating decoder
 - Decode the probability
 - If the probability is zero, decode another 3 bits as the repeat count
   from the same bitstream.
+
+Once all probabilities are loaded, baselines are computed as the total of
+all lower-numbered symbols.
 
 
 HUFFMAN CODES
@@ -236,33 +239,23 @@ order is reversed due to Gstd always reading least-significant-bit first.
 
 
 
-FSE VALUE DECODING
+ANS VALUE DECODING
 
-Unlike in Zstandard, Gstd uses a "state chaining" mechanism where only a
-single state value is maintained for all FSE tables, even though the bit
-usage of the state value differs for each FSE table.
+Gstd uses rANS instead of tANS/FSE like Zstd.  There are as many FSE states as
+there are parallel bitstrams and the initial value of each state for each
+block is 1.
 
-To accomodate this, when transitioning to other FSE states, the low bits
-corresponding to the table precision are updated and any bits above the
-ones that are left as their former value.
-
-Additionally, if a Huffman weight table is FSE encoded, the final state value
-is used for further sequence decoding.
-
-There are as many FSE state values and drain levels as there are parallel
-bitstreams.  The initial value of each state is 0 and the initial drain level
-is 9 bits.  The FSE state is not reset between blocks and is only initialized
-at the start of the Gstd stream.
-
-FSE values are decoding using a rotating decode and the state and drain level
-to use correspond to the bitstream accessed by the rotating decode process.
+Gstd uses a state precision of 12 bits.
 
 Whenever an FSE value is decoded, the following actions are performed:
-- Read as many bits as are required by the stream drain level.
-- Add the bits to the current state value.
-- Use the state value to determine the symbol and baseline from the FSE table.
-- Replace the FSE state with the new baseline and the drain level to the
-  number of bits in the FSE table entry.
+- Compute DrainLevel = (StatePrecision - floor(log(State)/log(2)))
+- Multiply the State value by 2^DrainLevel
+- Read DrainLevel bits from the bitstream and add the value to State
+- Compute SymLow = (State mod 2^AccuracyLog)
+- Use SymLow to determine the symbol and its base and probability.
+- Compute SymHigh = floor(State / 2^AccuracyLog)
+- Compute the new State as (SymHigh * Prob) + SymLow - Base
+
 
 Note that this process does NOT specify a preload, even though the preload
 is required for the bitstream read.  The preload size varies by decode step
@@ -275,7 +268,7 @@ DECODING AND EXECUTING SEQUENCES
 Sequence coefficients are decoded using rotating decode.
 
 The decode process for coefficients is as follows:
-- Preload 27 bits
+- Preload (ANS State Precision + 18) bits
 - Decode the literal length code
 - Decode the match length code
 - Decode the offset code

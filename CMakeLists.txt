@@ -29,6 +29,10 @@ add_library(zstd STATIC
 	modules/zstd/lib/decompress/zstd_ddict.c
 	modules/zstd/lib/decompress/zstd_decompress.c
 	modules/zstd/lib/decompress/zstd_decompress_block.c
+	modules/zstd/lib/dictBuilder/cover.c
+	modules/zstd/lib/dictBuilder/divsufsort.c
+	modules/zstd/lib/dictBuilder/fastcover.c
+	modules/zstd/lib/dictBuilder/zdict.c
 	)
 
 add_library(libdeflate STATIC
